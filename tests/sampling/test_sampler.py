@@ -45,7 +45,15 @@ def test_temperature_sharpens():
 
 
 @pytest.mark.parametrize("kw", [{"temperature": -0.1}, {"top_p": 0.0}, {"top_p": 1.5}, {"top_k": -1},
-                                {"max_tokens": -1}, {"stop": [""]}])
+                                {"max_tokens": -1}, {"stop": [""]}, {"temperature": float("inf")},
+                                {"temperature": float("nan")}, {"top_p": float("nan")},
+                                {"stop": ["x"] * 17}, {"stop": ["y" * 257]}])
 def test_invalid_params_raise(kw):
     with pytest.raises(ValueError):
         SamplingParams(**kw)
+
+
+def test_tiny_temperature_is_greedy_not_nan():
+    # 1 / 1e-30 overflows to inf; softmax of that is NaN and multinomial would crash the whole batch.
+    g = torch.Generator().manual_seed(0)
+    assert sample(LOGITS, SamplingParams(temperature=1e-30), g) == 1

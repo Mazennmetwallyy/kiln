@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+
+MAX_STOP_STRINGS = 16
+MAX_STOP_LENGTH = 256
 
 
 @dataclass
@@ -15,6 +19,8 @@ class SamplingParams:
     ignore_eos: bool = False
 
     def __post_init__(self) -> None:
+        if not (math.isfinite(self.temperature) and math.isfinite(self.top_p)):
+            raise ValueError("temperature and top_p must be finite numbers")
         if self.temperature < 0:
             raise ValueError(f"temperature must be >= 0, got {self.temperature}")
         if not 0 < self.top_p <= 1:
@@ -25,3 +31,6 @@ class SamplingParams:
             raise ValueError(f"max_tokens must be >= 0, got {self.max_tokens}")
         if any(s == "" for s in self.stop):
             raise ValueError("stop strings must be non-empty")
+        # Stop strings are matched on the shared engine thread every token: bound the work per request.
+        if len(self.stop) > MAX_STOP_STRINGS or any(len(s) > MAX_STOP_LENGTH for s in self.stop):
+            raise ValueError(f"at most {MAX_STOP_STRINGS} stop strings of at most {MAX_STOP_LENGTH} characters")

@@ -72,6 +72,8 @@ class LLMEngine:
             raise ValueError("prompt must contain at least one token")
         if params.stop and self.tokenizer is None:
             raise ValueError("stop strings need a tokenizer")
+        if min(prompt_ids) < 0 or max(prompt_ids) >= self.config.vocab_size:
+            raise ValueError(f"prompt token ids must be in [0, {self.config.vocab_size}) (the model's vocab)")
         total = len(prompt_ids) + params.max_tokens
         if total > self.max_context:
             raise ValueError(f"prompt ({len(prompt_ids)}) + max_tokens ({params.max_tokens}) = {total} "
@@ -123,15 +125,34 @@ class LLMEngine:
         rows = torch.tensor([r for r, _ in to_sample], dtype=torch.long, device=self.device)
         logits = self.model(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
                             PagedContext(self.cache, meta), logits_indices=rows)
-        logits = logits.cpu()  # one device sync per step
-
-        for i, (_, seq) in enumerate(to_sample):
-            outputs.append(self._process_token(seq, sample(logits[i], seq.params, seq.generator)))
+        for (_, seq), token in zip(to_sample, self._sample_all(logits, [s for _, s in to_sample]), strict=True):
+            outputs.append(self._process_token(seq, token))
         return outputs
 
     # ---- internals -----------------------------------------------------------------------------
-    def _process_token(self, seq: Sequence, token: int) -> RequestOutput:
+    def _sample_all(self, logits: torch.Tensor, seqs: list[Sequence]) -> list[int | None]:
+        """One device→host transfer per step. Greedy rows are argmax'd on the device, so only their token
+        ids cross over; rows that sample randomly bring their full logits to the CPU."""
+        greedy = [s.params.temperature == 0 for s in seqs]
+        tokens: list[int | None] = [None] * len(seqs)
+        if any(greedy):
+            idx = [i for i, g in enumerate(greedy) if g]
+            for i, t in zip(idx, logits[idx].argmax(dim=-1).tolist(), strict=True):
+                tokens[i] = t
+        if not all(greedy):
+            idx = [i for i, g in enumerate(greedy) if not g]
+            rows = logits[idx].cpu()
+            for j, i in enumerate(idx):
+                try:
+                    tokens[i] = sample(rows[j], seqs[i].params, seqs[i].generator)
+                except Exception:  # one bad request must not take the whole batch down
+                    tokens[i] = None
+        return tokens
+
+    def _process_token(self, seq: Sequence, token: int | None) -> RequestOutput:
         out = RequestOutput(seq.request_id)
+        if token is None:
+            return self._finish(seq, out, "error")
         params = seq.params
         stop_ids = set(params.stop_token_ids)
         if not params.ignore_eos:

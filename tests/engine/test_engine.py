@@ -113,6 +113,8 @@ def test_request_too_long_for_pool_rejected(tiny):
     ({"prompt_ids": []}, "prompt"),
     ({"prompt_ids": list(range(100)), "params": SamplingParams(max_tokens=100)}, "context"),
     ({"params": SamplingParams(stop=["x"], max_tokens=4)}, "tokenizer"),
+    ({"prompt_ids": [1, 2, 256]}, "vocab"),
+    ({"prompt_ids": [-1, 2]}, "vocab"),
 ])
 def test_add_request_validates_eagerly(tiny, kwargs, match):
     model, config, _ = tiny
@@ -154,3 +156,29 @@ def test_max_tokens_zero(tiny):
     outs = engine.step()
     assert [(o.request_id, o.new_token_ids, o.finished, o.finish_reason) for o in outs] == [("z", [], True, "length")]
     assert not engine.has_unfinished()
+
+
+def test_one_failing_request_does_not_fail_the_batch(tiny, monkeypatch):
+    import kiln.engine.engine as engine_mod
+
+    model, config, hf = tiny
+    engine = LLMEngine(model, config, None, num_blocks=64, block_size=4)
+    real_sample = engine_mod.sample
+
+    def flaky(logits, params, generator):
+        if params.seed == 666:
+            raise RuntimeError("boom")
+        return real_sample(logits, params, generator)
+
+    monkeypatch.setattr(engine_mod, "sample", flaky)
+    engine.add_request("bad", [1, 2, 3], SamplingParams(temperature=1.0, seed=666, max_tokens=5, ignore_eos=True))
+    engine.add_request("good", PROMPTS["r2"], greedy("r2"))
+    got, finish = {"bad": [], "good": []}, {}
+    while engine.has_unfinished():
+        for out in engine.step():
+            got[out.request_id] += out.new_token_ids
+            if out.finished:
+                finish[out.request_id] = out.finish_reason
+    assert finish == {"bad": "error", "good": "length"}
+    assert got["good"] == hf_greedy(hf, PROMPTS["r2"], MAX_TOKENS["r2"])
+    assert engine.stats().num_free_blocks == 64

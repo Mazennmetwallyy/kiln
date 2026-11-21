@@ -11,8 +11,11 @@ class StreamOptions(BaseModel):
     include_usage: bool = False
 
 
+MAX_API_STOP_STRINGS = 4  # OpenAI's limit
+
+
 class _Common(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
 
     model: str | None = None
     temperature: float = 1.0
@@ -30,6 +33,8 @@ class _Common(BaseModel):
         if self.n != 1:
             raise ValueError("only n=1 is supported")
         stop = [self.stop] if isinstance(self.stop, str) else list(self.stop or [])
+        if len(stop) > MAX_API_STOP_STRINGS:
+            raise ValueError(f"at most {MAX_API_STOP_STRINGS} stop strings are allowed")
         return SamplingParams(temperature=self.temperature, top_p=self.top_p, top_k=self.top_k, seed=self.seed,
                               max_tokens=max_tokens, stop=stop, ignore_eos=self.ignore_eos)
 

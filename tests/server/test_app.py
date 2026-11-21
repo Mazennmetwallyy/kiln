@@ -69,10 +69,12 @@ def test_stop_string(client):
     {"max_tokens": 5000},
     {"temperature": -1.0},
     {"top_p": 0.0},
+    {"stop": ["a", "b", "c", "d", "e"]},
+    {"prompt": [1, 2, 10**9]},
 ])
 def test_bad_requests_are_400(client, kwargs):
     with pytest.raises(openai.BadRequestError):
-        client.completions.create(model="tiny", prompt="x", **({"max_tokens": 4} | kwargs))
+        client.completions.create(model="tiny", **({"prompt": "x", "max_tokens": 4} | kwargs))
 
 
 def test_client_disconnect_frees_blocks(server):
@@ -99,3 +101,9 @@ def test_metrics(server, client):
         assert name in text, name
     gen = [line for line in text.splitlines() if line.startswith("kiln_generation_tokens_total ")]
     assert gen and float(gen[0].split()[1]) >= 3
+
+
+def test_non_finite_temperature_is_400(server):
+    body = '{"model": "tiny", "prompt": "x", "max_tokens": 2, "temperature": Infinity}'
+    r = httpx.post(f"{server[0]}/v1/completions", content=body, headers={"content-type": "application/json"})
+    assert r.status_code == 400

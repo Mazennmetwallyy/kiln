@@ -7,10 +7,12 @@ from torch import Tensor
 
 from kiln.sampling.params import SamplingParams
 
+GREEDY_BELOW = 1e-5
+
 
 def sample(logits: Tensor, params: SamplingParams, generator: torch.Generator | None) -> int:
     """logits: [vocab]. Greedy if temperature == 0, else temperature → top-k → top-p → draw."""
-    if params.temperature == 0:
+    if params.temperature < GREEDY_BELOW:  # dividing by ~0 overflows to inf and softmax then gives NaN
         return int(torch.argmax(logits))
 
     logits = logits.float() / params.temperature
