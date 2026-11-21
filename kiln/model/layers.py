@@ -33,6 +33,9 @@ class RotaryEmbedding(nn.Module):
     their own positions makes q·k depend only on the distance between them.
     """
 
+    cos: Tensor
+    sin: Tensor
+
     def __init__(self, head_dim: int, theta: float, max_positions: int):
         super().__init__()
         inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
