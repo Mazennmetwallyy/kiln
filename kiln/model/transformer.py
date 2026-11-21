@@ -43,9 +43,13 @@ class Transformer(nn.Module):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def forward(self, input_ids: Tensor, positions: Tensor, ctx: AttentionContext) -> Tensor:
-        """input_ids, positions: [T] (flat, no batch dim). Returns fp32 logits [T, vocab]."""
+    def forward(self, input_ids: Tensor, positions: Tensor, ctx: AttentionContext,
+                logits_indices: Tensor | None = None) -> Tensor:
+        """input_ids, positions: [T] (flat, no batch dim). Returns fp32 logits [T, vocab], or only the
+        rows in `logits_indices` (a prefill only needs its last token's logits; a 151k vocab is big)."""
         x = self.model.embed_tokens(input_ids)
         for i, layer in enumerate(self.model.layers):
             x = layer(x, positions, ctx, i, self.rotary)
+        if logits_indices is not None:
+            x = x[logits_indices]
         return self.lm_head(self.model.norm(x)).float()
