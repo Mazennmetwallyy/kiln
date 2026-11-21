@@ -9,8 +9,8 @@ An LLM inference engine built from scratch in Python and PyTorch. It has its own
 | M1 Model: own Qwen2/Llama forward pass, sampling, streaming, CLI | ✅ | |
 | M2 Paged KV cache: block manager, copy-on-write, paged attention | ✅ | |
 | M3 Continuous batching: iteration-level scheduler, chunked prefill, preemption | ✅ | |
-| M4 OpenAI-compatible server | ⏳ | |
-| M5 Benchmarks | | |
+| M4 OpenAI-compatible server: SSE streaming, cancellation, Prometheus metrics | ✅ | |
+| M5 Benchmarks | ⏳ | |
 | M6 Prefix caching · M7 Speculative decoding · M8 Metal kernel · M9 Visualiser | | |
 
 **M1 results** (Apple M2, 8 GB):
@@ -25,6 +25,22 @@ An LLM inference engine built from scratch in Python and PyTorch. It has its own
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/kiln generate --model Qwen/Qwen2.5-0.5B-Instruct --chat --prompt "Explain a KV cache in one sentence." --device mps --dtype fp16
 ```
+
+Serve it with an OpenAI-compatible API and call it from any OpenAI client:
+
+```bash
+.venv/bin/kiln serve --model Qwen/Qwen2.5-0.5B-Instruct --port 8000   # Apple GPU, fp16, 1 GB KV pool
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+stream = client.chat.completions.create(model="qwen", messages=[{"role": "user", "content": "Hi!"}], stream=True)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="") if chunk.choices else None
+```
+
+Endpoints: `/v1/completions`, `/v1/chat/completions` (streaming and non-streaming), `/v1/models`, `/health`, `/metrics`.
 
 Tests: `pytest` (fast, CPU, no downloads). `pytest --runslow --runmps tests/integration -s` runs the real-model checks.
 

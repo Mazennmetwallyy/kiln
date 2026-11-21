@@ -39,7 +39,21 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--seed", type=int, default=None)
     g.add_argument("--device", default="cpu", choices=["cpu", "mps"])
     g.add_argument("--dtype", default="fp32", choices=list(_DTYPES))
+    sv = sub.add_parser("serve", help="run the OpenAI-compatible HTTP server")
+    sv.add_argument("--model", required=True, help="Hugging Face repo id or local directory")
+    sv.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu",
+                    choices=["cpu", "mps"])
+    sv.add_argument("--dtype", default=None, choices=list(_DTYPES), help="default: fp16 on mps, fp32 on cpu")
+    sv.add_argument("--kv-memory-gb", type=float, default=1.0, help="memory for the paged KV pool")
+    sv.add_argument("--block-size", type=int, default=16)
+    sv.add_argument("--max-num-seqs", type=int, default=32)
+    sv.add_argument("--max-batched-tokens", type=int, default=512)
+    sv.add_argument("--max-context", type=int, default=None)
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
+    if args.command == "serve":
+        return serve(args)
 
     path = resolve_model_dir(args.model)
     model, config = load_model(path, dtype=_DTYPES[args.dtype], device=args.device)
@@ -67,6 +81,29 @@ def main(argv: list[str] | None = None) -> int:
     elapsed = time.perf_counter() - start
     print(f"\n[{n} tokens in {elapsed:.2f}s ({n / elapsed:.1f} tokens/s end to end, incl. prefill), "
           f"finish={finish}]", file=sys.stderr)
+    return 0
+
+
+def serve(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    from kiln.cache.paged import PagedKVCache
+    from kiln.engine.engine import LLMEngine
+    from kiln.server.app import create_app
+    from kiln.server.async_engine import AsyncEngine
+
+    dtype = _DTYPES[args.dtype or ("fp16" if args.device == "mps" else "fp32")]
+    path = resolve_model_dir(args.model)
+    model, config = load_model(path, dtype=dtype, device=args.device)
+    tok = Tokenizer.from_hf_dir(path)
+    num_blocks = PagedKVCache.blocks_for_memory(config, int(args.kv_memory_gb * 2**30), args.block_size, dtype)
+    engine = LLMEngine(model, config, tok, num_blocks=num_blocks, block_size=args.block_size,
+                       max_num_seqs=args.max_num_seqs, max_batched_tokens=args.max_batched_tokens,
+                       max_context=args.max_context)
+    print(f"kiln: {args.model} on {args.device} ({args.dtype or dtype}), KV pool {num_blocks} blocks "
+          f"x {args.block_size} = {num_blocks * args.block_size} tokens", file=sys.stderr)
+    uvicorn.run(create_app(AsyncEngine(engine), tok, args.model), host=args.host, port=args.port,
+                log_level="warning")
     return 0
 
 

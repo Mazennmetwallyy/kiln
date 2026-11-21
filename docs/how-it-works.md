@@ -211,3 +211,55 @@ On the real models, **all 12 test prompts submitted at once** produce output tok
 - Which request gets preempted, and why that one?
 - Why recompute instead of swap on Apple Silicon?
 - How do you keep seeded sampling the same whether a request runs alone or in a batch?
+
+---
+
+## M4: The OpenAI-compatible server
+
+### Shape
+
+```
+HTTP clients ──► FastAPI (asyncio event loop) ──commands──► engine thread (owns the LLMEngine)
+     ▲                     ▲                                       │ step(): schedule → forward → sample
+     └── SSE chunks ◄── per-request asyncio.Queue ◄─call_soon_threadsafe─┘
+```
+
+- **One thread owns the engine.** The engine isn't thread-safe and doesn't need to be. The web side sends it commands (`add`, `abort`, `stats`) through a thread-safe queue. After each step, the engine thread posts every request's new tokens to that request's `asyncio.Queue` with `loop.call_soon_threadsafe`. While the model runs a step, the event loop keeps accepting connections and streaming tokens.
+- **Why not run the model on the event loop?** A forward pass blocks for tens of milliseconds. On the event loop it would freeze every other connection for that time.
+
+### Errors before bytes
+
+Once a streaming response has sent its `200 OK` header, you can't turn it into a `400`. So `submit()` runs the engine's validation (prompt too long, bad sampling values, `n > 1`, ...) on the engine thread and **awaits the result** before the response starts. Invalid requests get a proper OpenAI-style error: `{"error": {"message": ..., "type": "invalid_request_error"}}` with HTTP 400.
+
+### Cancellation
+
+If a client disconnects mid-stream, Starlette cancels the response task. That closes Kiln's async generator, and its `finally:` block sends an `abort` to the engine thread, which frees the request's KV blocks. A test opens a stream, reads a few chunks, hangs up, and checks that all blocks are free again within 2 seconds. Without this, every closed browser tab would leak GPU memory until its `max_tokens` ran out.
+
+### Streaming format
+
+Server-Sent Events, the same format OpenAI uses:
+- each chunk is a line `data: {json}` followed by a blank line;
+- a chat stream opens with a `{"role": "assistant"}` delta, then sends content deltas;
+- the final chunk carries `finish_reason` (`"stop"` or `"length"`);
+- an optional usage chunk follows (`stream_options.include_usage`);
+- the stream ends with `data: [DONE]`.
+
+Every test drives the server with the official `openai` Python client, so "OpenAI-compatible" is tested, not claimed.
+
+### Metrics (`/metrics`, Prometheus)
+
+| metric | why it matters |
+|---|---|
+| `kiln_time_to_first_token_seconds` | what a user feels before anything appears; dominated by queueing + prefill |
+| `kiln_inter_token_latency_seconds` | smoothness of the stream; dominated by decode-step time |
+| `kiln_e2e_request_latency_seconds` | total request time |
+| `kiln_running_requests`, `kiln_waiting_requests` | load and queueing |
+| `kiln_kv_blocks_used` / `_total` | memory pressure, which predicts preemptions |
+| `kiln_preemptions`, token counters | throughput and thrashing |
+
+### Questions to be ready for
+- Why does the model run on its own thread rather than on the asyncio event loop?
+- How does an output produced on the engine thread reach the right HTTP response?
+- Why must validation finish before a streaming response starts?
+- What happens, step by step, when a client disconnects mid-stream?
+- TTFT vs inter-token latency: what does each measure, and what makes each worse?
