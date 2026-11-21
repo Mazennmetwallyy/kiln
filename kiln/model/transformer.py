@@ -18,10 +18,9 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = SwiGLU(config.hidden_size, config.intermediate_size)
 
-    def forward(self, x: Tensor, positions: Tensor, ctx: AttentionContext, layer_idx: int,
-                rope: RotaryEmbedding) -> Tensor:
+    def forward(self, x: Tensor, rope: tuple[Tensor, Tensor], ctx: AttentionContext, layer_idx: int) -> Tensor:
         # Pre-norm residual blocks: x + attn(norm(x)), then x + mlp(norm(x)).
-        x = x + self.self_attn(self.input_layernorm(x), positions, ctx, layer_idx, rope)
+        x = x + self.self_attn(self.input_layernorm(x), rope, ctx, layer_idx)
         return x + self.mlp(self.post_attention_layernorm(x))
 
 
@@ -48,8 +47,9 @@ class Transformer(nn.Module):
         """input_ids, positions: [T] (flat, no batch dim). Returns fp32 logits [T, vocab], or only the
         rows in `logits_indices` (a prefill only needs its last token's logits; a 151k vocab is big)."""
         x = self.model.embed_tokens(input_ids)
+        rope = self.rotary.angles(positions, x.dtype)
         for i, layer in enumerate(self.model.layers):
-            x = layer(x, positions, ctx, i, self.rotary)
+            x = layer(x, rope, ctx, i)
         if logits_indices is not None:
             x = x[logits_indices]
         return self.lm_head(self.model.norm(x)).float()

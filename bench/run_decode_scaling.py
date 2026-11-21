@@ -34,9 +34,9 @@ def prompts(b: int) -> list[list[int]]:
     return [[(31 * i + 7 * j) % 5000 + 100 for j in range(PROMPT)] for i in range(b)]
 
 
-def kiln_run(model, config, b: int) -> float:
+def kiln_run(model, config, b: int, backend: str = "torch") -> float:
     engine = LLMEngine(model, config, None, num_blocks=2048, block_size=16, max_num_seqs=128,
-                       max_batched_tokens=PROMPT * b)
+                       max_batched_tokens=PROMPT * b, attention_backend=backend)
     for i, p in enumerate(prompts(b)):
         engine.add_request(str(i), p, SamplingParams(temperature=0, max_tokens=NEW, ignore_eos=True))
     torch.mps.synchronize()
@@ -59,12 +59,13 @@ def main() -> None:
     torch.set_grad_enabled(False)
     path = Path(snapshot_download(MODEL, allow_patterns=["*.json", "*.safetensors"]))
     out: dict = {"meta": {"env": describe(), "model": MODEL, "dtype": "fp16", "prompt_tokens": PROMPT,
-                          "new_tokens": NEW}, "kiln": {}, "hf_static": {}}
+                          "new_tokens": NEW}, "kiln": {}, "kiln_metal": {}, "hf_static": {}}
     model, config = load_model(path, dtype=torch.float16, device="mps")
-    kiln_run(model, config, 2)  # warm-up
-    for b in BATCHES:
-        out["kiln"][b] = kiln_run(model, config, b)
-        print(f"kiln b={b}: {out['kiln'][b]:.0f} tok/s", flush=True)
+    for key, backend in (("kiln", "torch"), ("kiln_metal", "metal")):
+        kiln_run(model, config, 2, backend)  # warm-up
+        for b in BATCHES:
+            out[key][b] = kiln_run(model, config, b, backend)
+            print(f"{key} b={b}: {out[key][b]:.0f} tok/s", flush=True)
     del model
     gc.collect()
     torch.mps.empty_cache()

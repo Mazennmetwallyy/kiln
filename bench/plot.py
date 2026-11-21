@@ -19,7 +19,7 @@ OUT = Path(__file__).parents[1] / "docs" / "img"
 
 # Categorical slots in fixed order: identity follows the system, never its rank.
 SERIES = {"kiln": ("Kiln", "#2a78d6", "o"), "hf-static": ("HF static batching", "#eb6834", "s"),
-          "hf-sequential": ("HF sequential", "#1baf7a", "^")}
+          "hf-sequential": ("HF sequential", "#1baf7a", "^"), "kiln-metal": ("Kiln + Metal kernel", "#eda100", "D")}
 INK, INK_2, MUTED, GRID, AXIS, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb"
 
 plt.rcParams.update({
@@ -70,7 +70,9 @@ def serving() -> None:
 def decode_scaling() -> None:
     data = json.loads((RESULTS / "decode_scaling.json").read_text())
     fig, ax = plt.subplots(figsize=(6.5, 4))
-    for key, system in (("kiln", "kiln"), ("hf_static", "hf-static")):
+    for key, system in (("kiln", "kiln"), ("kiln_metal", "kiln-metal"), ("hf_static", "hf-static")):
+        if key not in data:
+            continue
         name, color, marker = SERIES[system]
         xs = [int(b) for b in data[key]]
         ys = list(data[key].values())

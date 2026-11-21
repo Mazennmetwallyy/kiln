@@ -30,7 +30,7 @@ N_PROMPTS, MAX_NEW = 12, 128
 
 def run(target, tconfig, draft, dconfig, prompts, out_lens, k: int, batch: int) -> tuple[dict, list[list[int]]]:
     kw: dict[str, Any] = {"draft_model": draft, "draft_config": dconfig, "num_speculative_tokens": k} if k else {}
-    engine = LLMEngine(target, tconfig, None, num_blocks=1024, block_size=16, max_num_seqs=batch, **kw)
+    engine = LLMEngine(target, tconfig, None, num_blocks=128, block_size=16, max_num_seqs=batch, **kw)
     outs: dict[str, list[int]] = {}
     torch.mps.synchronize()
     start = time.perf_counter()

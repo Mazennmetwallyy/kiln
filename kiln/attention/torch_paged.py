@@ -32,7 +32,7 @@ class PagedContext:
         if meta.is_pure_decode and self.backend == "metal":
             assert meta.block_tables_t is not None and meta.seq_lens_t is not None
             return metal.paged_decode_attention(q, k_pool, v_pool, meta.block_tables_t, meta.seq_lens_t,
-                                                meta.block_size)
+                                                meta.block_size, max(meta.seq_lens))
         if meta.is_pure_decode:
             assert meta.decode_slots is not None
             keys = k_pool[meta.decode_slots].transpose(1, 2)  # [B, Hkv, L, D]

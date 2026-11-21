@@ -49,13 +49,20 @@ class RotaryEmbedding(nn.Module):
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat([-x2, x1], dim=-1)
 
+    def angles(self, positions: Tensor, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+        """cos and sin for these positions, [T, 1, D], computed once per forward pass and shared by every
+        layer. They're computed in fp32 and cast to the model's dtype, as Hugging Face does."""
+        return self.cos[positions].unsqueeze(1).to(dtype), self.sin[positions].unsqueeze(1).to(dtype)
+
+    @classmethod
+    def rotate(cls, q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor, Tensor]:
+        """q: [T, H, D], k: [T, Hkv, D]. Rotates in the inputs' own dtype: no per-layer dtype round trips,
+        which on the GPU are each a separate kernel launch."""
+        return q * cos + cls._rotate_half(q) * sin, k * cos + cls._rotate_half(k) * sin
+
     def forward(self, q: Tensor, k: Tensor, positions: Tensor) -> tuple[Tensor, Tensor]:
         # q: [T, H, D], k: [T, Hkv, D], positions: [T]
-        cos = self.cos[positions].unsqueeze(1)  # [T, 1, D]
-        sin = self.sin[positions].unsqueeze(1)
-        q_out = q.float() * cos + self._rotate_half(q.float()) * sin
-        k_out = k.float() * cos + self._rotate_half(k.float()) * sin
-        return q_out.to(q.dtype), k_out.to(k.dtype)
+        return self.rotate(q, k, *self.angles(positions, q.dtype))
 
 
 class SwiGLU(nn.Module):

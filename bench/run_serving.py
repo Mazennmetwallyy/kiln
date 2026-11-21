@@ -26,9 +26,11 @@ RESULTS = Path(__file__).parent / "results" / "serving.json"
 
 def command(system: str, port: int) -> list[str]:
     py = sys.executable
-    if system == "kiln":
+    if system in ("kiln", "kiln-metal"):
+        backend = "metal" if system == "kiln-metal" else "torch"
         return [py, "-m", "kiln.cli", "serve", "--model", MODEL, "--port", str(port), "--device", "mps",
-                "--dtype", "fp16", "--kv-memory-gb", "1", "--max-num-seqs", "64", "--max-batched-tokens", "512"]
+                "--dtype", "fp16", "--kv-memory-gb", "1", "--max-num-seqs", "64", "--max-batched-tokens", "512",
+                "--attention-backend", backend]
     if system == "hf-sequential":
         return [py, "-m", "bench.hf_server", "--mode", "sequential", "--model", MODEL, "--port", str(port)]
     if system == "hf-static":
