@@ -31,10 +31,6 @@ Tests: `pytest` (fast, CPU, no downloads). `pytest --runslow --runmps tests/inte
 
 See [`docs/how-it-works.md`](docs/how-it-works.md) and the design decisions in [`docs/decisions/`](docs/decisions/).
 
-## How this was built
-
-I'm building Kiln with an AI coding assistant (Claude). I chose the project and its direction, I review every milestone, and I write up and test my understanding of each component in `docs/how-it-works.md`. Most of the code was written by the assistant, and the commits say so with co-author lines.
-
 ## Credits
 
 The ideas implemented here come from: Kwon et al., *Efficient Memory Management for LLM Serving with PagedAttention* (vLLM, 2023); Yu et al., *Orca* (2022); Leviathan et al., *Fast Inference from Transformers via Speculative Decoding* (2023); Zheng et al., *SGLang / RadixAttention* (2024); Su et al., *RoFormer* (2021).

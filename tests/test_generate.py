@@ -156,3 +156,18 @@ def test_stream_matches_generate_without_stop():
     deltas = list(stream_generate(_Scripted(script, 49152), cfg, [1], params, tokenizer=tok))
     assert "".join(deltas) == full.text == "Héllo 👋🏽 world"
     assert full.finish_reason == "stop"
+
+
+def test_max_context_above_model_limit_is_capped(tmp_path):
+    # Review finding: max_context must not lift the model's own position limit (128 for the tiny model).
+    path, _ = make_tiny_hf_model("llama", tmp_path)
+    model, config = load_model(path)
+    with pytest.raises(ValueError, match="context"):
+        generate(model, config, list(range(120)), SamplingParams(max_tokens=20), max_context=1000)
+
+
+def test_max_context_zero_is_not_unset(tmp_path):
+    path, _ = make_tiny_hf_model("llama", tmp_path)
+    model, config = load_model(path)
+    with pytest.raises(ValueError, match="context"):
+        generate(model, config, PROMPT, SamplingParams(max_tokens=1), max_context=0)

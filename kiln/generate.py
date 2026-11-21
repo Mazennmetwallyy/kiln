@@ -77,7 +77,9 @@ def _token_stream(model: nn.Module, config: ModelConfig, prompt_ids: list[int], 
     """Yield generated token ids (stop/EOS ids excluded); return the finish reason."""
     if not prompt_ids:
         raise ValueError("prompt must contain at least one token")
-    limit = max_context or config.max_position_embeddings
+    limit = config.max_position_embeddings
+    if max_context is not None:
+        limit = min(limit, max_context)  # a deployment may lower the limit, never raise it past RoPE's table
     total = len(prompt_ids) + params.max_tokens
     if total > limit:
         raise ValueError(f"prompt ({len(prompt_ids)}) + max_tokens ({params.max_tokens}) = {total} "
