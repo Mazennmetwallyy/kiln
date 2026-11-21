@@ -3,6 +3,7 @@
 Run locally: pytest --runslow --runmps tests/integration -v -s
 """
 
+import functools
 import gc
 import json
 import time
@@ -13,6 +14,7 @@ import torch
 from huggingface_hub import snapshot_download
 from transformers import AutoModelForCausalLM, GenerationConfig
 
+from kiln.engine.engine import LLMEngine
 from kiln.generate import generate
 from kiln.model.kv_cache import ContiguousKVCache
 from kiln.model.loader import load_model
@@ -31,14 +33,12 @@ def _prompt_ids(tok: Tokenizer, text: str) -> list[int]:
     return tok.encode(chat, add_special_tokens=False)
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize("repo", MODELS)
-def test_fp32_greedy_exact(repo):
+@functools.cache
+def _references(repo):
+    """HF greedy continuations for every prompt, computed once per model and then freed."""
     path = Path(snapshot_download(repo, allow_patterns=PATTERNS))
     tok = Tokenizer.from_hf_dir(path)
     prompts = [_prompt_ids(tok, p) for p in PROMPTS]
-
-    # Reference first, then free it: two fp32 copies of a 0.5B model is a lot for an 8 GB machine.
     hf = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32).eval()
     # A clean config: checkpoints ship sampling defaults (Qwen sets repetition_penalty=1.1), and HF
     # applies a repetition penalty even when do_sample=False, so the reference would not be pure greedy.
@@ -46,12 +46,14 @@ def test_fp32_greedy_exact(repo):
     with torch.no_grad():
         refs = [hf.generate(torch.tensor([ids]), do_sample=False, max_new_tokens=NEW_TOKENS,
                             pad_token_id=0)[0, len(ids):].tolist() for ids in prompts]
+    return path, prompts, refs, hf
 
-    model, config = load_model(path, dtype=torch.float32, device="cpu")
-    params = SamplingParams(temperature=0.0, max_tokens=NEW_TOKENS, ignore_eos=True)
+
+def _check(repo, outs):
+    """Exact match, except a divergence is allowed where HF's top-2 logit margin is a near-tie."""
+    _, prompts, refs, hf = _references(repo)
     report = []
-    for text, ids, ref in zip(PROMPTS, prompts, refs, strict=True):
-        out = generate(model, config, ids, params).token_ids
+    for text, ids, ref, out in zip(PROMPTS, prompts, refs, outs, strict=True):
         if out == ref:
             continue
         i = next(j for j, (a, b) in enumerate(zip(out, ref, strict=True)) if a != b)
@@ -63,7 +65,33 @@ def test_fp32_greedy_exact(repo):
         assert margin < NEAR_TIE, f"{repo}: prompt {text[:40]!r} diverged at token {i} (margin {margin:.4g})"
     exact = len(PROMPTS) - len(report)
     print(f"\n{repo}: {exact}/{len(PROMPTS)} prompts exact; near-tie divergences: {report}")
-    del hf, model
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("repo", MODELS)
+def test_fp32_greedy_exact(repo):
+    path, prompts, _, _ = _references(repo)
+    model, config = load_model(path, dtype=torch.float32, device="cpu")
+    params = SamplingParams(temperature=0.0, max_tokens=NEW_TOKENS, ignore_eos=True)
+    _check(repo, [generate(model, config, ids, params).token_ids for ids in prompts])
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("repo", MODELS)
+def test_fp32_engine_all_prompts_at_once(repo):
+    """All 12 prompts go through the engine together: ragged prefill + batched decode."""
+    path, prompts, _, _ = _references(repo)
+    model, config = load_model(path, dtype=torch.float32, device="cpu")
+    engine = LLMEngine(model, config, None, num_blocks=128, block_size=16, max_batched_tokens=256)
+    params = SamplingParams(temperature=0.0, max_tokens=NEW_TOKENS, ignore_eos=True)
+    for i, ids in enumerate(prompts):
+        engine.add_request(str(i), ids, params)
+    got: dict[str, list[int]] = {str(i): [] for i in range(len(prompts))}
+    while engine.has_unfinished():
+        for out in engine.step():
+            got[out.request_id] += out.new_token_ids
+    _check(repo, [got[str(i)] for i in range(len(prompts))])
+    del model
     gc.collect()
 
 

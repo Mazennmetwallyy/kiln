@@ -153,3 +153,61 @@ Asking a GPU tensor for a value (`int(tensor)`) makes the CPU wait for the GPU t
 - Why does writing into a shared block need copy-on-write, and why only for the *last, partly filled* block?
 - What does `rollback` do, and which feature needs it?
 - Why does `int(gpu_tensor)` hurt performance?
+
+---
+
+## M3: Continuous batching
+
+### Why batch at all
+
+Decoding one token means reading **every weight** of the model from memory. That's about 1 GB for Qwen2.5-0.5B in fp16, read to produce a single token. The GPU's arithmetic units mostly sit idle waiting for memory. If 16 requests decode together, the weights are read once and used 16 times. The cost per step hardly changes, but you get 16 tokens instead of 1. Batching is the single biggest lever in LLM serving.
+
+### Static vs continuous batching
+
+**Static batching** collects a batch, pads every prompt to the same length, and runs until the **slowest** request finishes. Requests that finish early leave empty slots that do nothing, and new requests wait for the whole batch.
+
+**Continuous (iteration-level) batching**, from the Orca paper, makes the scheduling decision **every step**:
+
+```
+step 1:  [A prefill 40 tok][B prefill 12 tok]
+step 2:  [A][B]                                <- both decoding, 1 token each
+step 3:  [A][B][C prefill 30 tok]               <- C joins mid-flight
+step 4:  [A][C]                                 <- B finished, its slot is reused at once
+```
+
+Kiln's engine (`kiln/engine/engine.py`) loops: **schedule → build one flat batch → one forward pass → sample → update**. The flat batch mixes prompt chunks and single decode tokens from any number of requests. That's exactly what the flat 1-D forward (ADR 0001) and the paged attention backend (ADR 0002) were built for.
+
+### The scheduler's rules (`kiln/engine/scheduler.py`)
+
+1. **Running requests first, oldest first.** Each gets its next token, or its next prompt chunk, within the step's **token budget** (default 512).
+2. **Chunked prefill.** A 2,000-token prompt doesn't get processed in one giant step that freezes everyone else's output. It's split across steps to fit the budget, so streaming users keep getting tokens.
+3. **Strict first-come, first-served admission.** If the request at the front of the queue doesn't fit yet, smaller ones behind it don't jump ahead. That would starve big requests forever.
+4. **Preemption when memory runs out.** If a running request needs a new block and none are free, the **most recently admitted** request is kicked out. Its blocks are freed, and it goes back to the front of the queue to recompute later (ADR 0003 explains why recompute rather than swap on a Mac). Newest-first preemption means the oldest requests always make progress, so the system can't livelock.
+5. **Requests that could never fit are rejected up front.** If prompt + max_tokens exceeds the whole pool, there's an immediate error rather than a deadlock.
+
+### Correctness under batching
+
+Batching changes which matrices get multiplied together, so it's a classic source of subtle bugs. Kiln's tests check that **every request produces the same tokens it would produce alone**:
+- 8 requests of different lengths in one engine, compared against Hugging Face;
+- the same with a deliberately tiny pool that forces preemptions;
+- with a 7-token budget that forces chunked prefill;
+- a request added while others are mid-generation;
+- seeded random sampling, which gives identical tokens batched or alone because each request owns its own random number generator.
+
+A Hypothesis test also runs 150 random workloads through the scheduler. It checks the budget and sequence limits on every step, that every request finishes, and that no KV block leaks.
+
+On the real models, **all 12 test prompts submitted at once** produce output token-for-token identical to Hugging Face for both Qwen2.5-0.5B and SmolLM2-135M.
+
+### Smaller details that matter
+
+- **Only compute the logits you need.** A prefill of 500 tokens doesn't need 500 × 151,936 logits (300 MB in fp32), only the last row. `forward(..., logits_indices=...)` applies the final projection to just the rows that get sampled.
+- **One GPU sync per step.** All sampled rows move to the CPU together.
+- **Errors come early.** `add_request` validates everything before queuing, so a server can return a clean 400 error instead of breaking a stream midway.
+
+### Questions to be ready for
+- Why is batching decode steps almost free, in terms of memory bandwidth?
+- Static vs continuous batching: where does static waste work?
+- What problem does chunked prefill solve?
+- Which request gets preempted, and why that one?
+- Why recompute instead of swap on Apple Silicon?
+- How do you keep seeded sampling the same whether a request runs alone or in a batch?

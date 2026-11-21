@@ -8,13 +8,14 @@ An LLM inference engine built from scratch in Python and PyTorch. It has its own
 |---|---|---|
 | M1 Model: own Qwen2/Llama forward pass, sampling, streaming, CLI | ✅ | |
 | M2 Paged KV cache: block manager, copy-on-write, paged attention | ✅ | |
-| M3 Continuous batching | ⏳ | |
-| M4 OpenAI-compatible server | | |
+| M3 Continuous batching: iteration-level scheduler, chunked prefill, preemption | ✅ | |
+| M4 OpenAI-compatible server | ⏳ | |
 | M5 Benchmarks | | |
 | M6 Prefix caching · M7 Speculative decoding · M8 Metal kernel · M9 Visualiser | | |
 
 **M1 results** (Apple M2, 8 GB):
 - Greedy output is **token-for-token identical to Hugging Face `transformers`** on 12/12 test prompts for both Qwen2.5-0.5B-Instruct and SmolLM2-135M-Instruct (fp32, 64 tokens each). Logits match exactly.
+- **Batching doesn't change outputs:** all 12 prompts submitted to the engine at once (ragged prefill + batched decode) are still token-for-token identical to Hugging Face for both models.
 - In fp16 on the Mac GPU (MPS), the top-1 token agrees on every prompt (worst logit difference 0.064).
 - Single-request decode, Qwen2.5-0.5B, fp16, MPS: 32.0 tokens/s on the paged cache (23.5 in M1, before GPU syncs were removed from the attention layers). That's the unbatched baseline M3 improves on.
 
