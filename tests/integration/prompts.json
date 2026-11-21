@@ -1,0 +1,14 @@
+[
+  "What is the capital of France?",
+  "Write a haiku about autumn leaves.",
+  "Explain what a hash table is in two sentences.",
+  "Write a Python function that checks whether a string is a palindrome.",
+  "List three causes of the First World War.",
+  "Translate 'Good morning, how are you?' into Spanish and German.",
+  "什么是机器学习？请用一句话回答。",
+  "Give me a fun fact about octopuses 🐙.",
+  "What is 17 multiplied by 23? Show your working.",
+  "Summarise the plot of Romeo and Juliet in one paragraph.",
+  "Write a SQL query that returns the ten most recent orders from an 'orders' table.",
+  "You are given an array of integers and a target. Describe an O(n) algorithm that finds two numbers adding up to the target, and explain why it is O(n). Then give a short Python implementation with comments and a worked example on the input [2, 7, 11, 15] with target 9."
+]

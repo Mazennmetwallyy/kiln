@@ -1,0 +1,102 @@
+"""Exact-match correctness against Hugging Face transformers on real checkpoints.
+
+Run locally: pytest --runslow --runmps tests/integration -v -s
+"""
+
+import gc
+import json
+import time
+from pathlib import Path
+
+import pytest
+import torch
+from huggingface_hub import snapshot_download
+from transformers import AutoModelForCausalLM, GenerationConfig
+
+from kiln.generate import generate
+from kiln.model.kv_cache import ContiguousKVCache
+from kiln.model.loader import load_model
+from kiln.sampling import SamplingParams
+from kiln.tokenizer import Tokenizer
+
+PROMPTS = json.loads((Path(__file__).parent / "prompts.json").read_text())
+NEW_TOKENS = 64
+NEAR_TIE = 1e-3  # spec 5.10: a divergence is allowed only where the reference's top-2 margin is below this
+MODELS = ["Qwen/Qwen2.5-0.5B-Instruct", "HuggingFaceTB/SmolLM2-135M-Instruct"]
+PATTERNS = ["*.json", "*.safetensors", "*.jinja"]
+
+
+def _prompt_ids(tok: Tokenizer, text: str) -> list[int]:
+    chat = tok.apply_chat_template([{"role": "user", "content": text}])
+    return tok.encode(chat, add_special_tokens=False)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("repo", MODELS)
+def test_fp32_greedy_exact(repo):
+    path = Path(snapshot_download(repo, allow_patterns=PATTERNS))
+    tok = Tokenizer.from_hf_dir(path)
+    prompts = [_prompt_ids(tok, p) for p in PROMPTS]
+
+    # Reference first, then free it: two fp32 copies of a 0.5B model is a lot for an 8 GB machine.
+    hf = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32).eval()
+    # A clean config: checkpoints ship sampling defaults (Qwen sets repetition_penalty=1.1), and HF
+    # applies a repetition penalty even when do_sample=False, so the reference would not be pure greedy.
+    hf.generation_config = GenerationConfig(eos_token_id=None, pad_token_id=0)
+    with torch.no_grad():
+        refs = [hf.generate(torch.tensor([ids]), do_sample=False, max_new_tokens=NEW_TOKENS,
+                            pad_token_id=0)[0, len(ids):].tolist() for ids in prompts]
+
+    model, config = load_model(path, dtype=torch.float32, device="cpu")
+    params = SamplingParams(temperature=0.0, max_tokens=NEW_TOKENS, ignore_eos=True)
+    report = []
+    for text, ids, ref in zip(PROMPTS, prompts, refs, strict=True):
+        out = generate(model, config, ids, params).token_ids
+        if out == ref:
+            continue
+        i = next(j for j, (a, b) in enumerate(zip(out, ref, strict=True)) if a != b)
+        with torch.no_grad():
+            logits = hf(torch.tensor([ids + ref[:i]])).logits[0, -1]
+        top2 = torch.topk(logits, 2).values
+        margin = float(top2[0] - top2[1])
+        report.append((text[:40], i, margin))
+        assert margin < NEAR_TIE, f"{repo}: prompt {text[:40]!r} diverged at token {i} (margin {margin:.4g})"
+    exact = len(PROMPTS) - len(report)
+    print(f"\n{repo}: {exact}/{len(PROMPTS)} prompts exact; near-tie divergences: {report}")
+    del hf, model
+    gc.collect()
+
+
+@pytest.mark.mps
+@pytest.mark.slow
+def test_qwen_fp16_mps_logits_close():
+    path = Path(snapshot_download(MODELS[0], allow_patterns=PATTERNS))
+    tok = Tokenizer.from_hf_dir(path)
+    prompts = [_prompt_ids(tok, p) for p in PROMPTS]
+
+    ref_model, config = load_model(path, dtype=torch.float32, device="cpu")
+    with torch.no_grad():
+        refs = [ref_model(torch.tensor(ids), torch.arange(len(ids)),
+                          ContiguousKVCache(config, len(ids), torch.float32, "cpu"))[-1] for ids in prompts]
+    del ref_model
+    gc.collect()
+
+    model, config = load_model(path, dtype=torch.float16, device="mps")
+    worst = 0.0
+    for ids, ref in zip(prompts, refs, strict=True):
+        with torch.no_grad():
+            out = model(torch.tensor(ids, device="mps"), torch.arange(len(ids), device="mps"),
+                        ContiguousKVCache(config, len(ids), torch.float16, "mps"))[-1].cpu()
+        worst = max(worst, float((out - ref).abs().max()))
+        assert int(out.argmax()) == int(ref.argmax())
+    print(f"\nMPS fp16 vs CPU fp32: worst max-abs logit diff {worst:.4f}; "
+          f"MPS memory {torch.mps.driver_allocated_memory() / 2**30:.2f} GiB")
+    assert worst < 0.1
+
+    # Single-stream decode speed, for the README (measured, not claimed).
+    params = SamplingParams(temperature=0.0, max_tokens=128, ignore_eos=True)
+    generate(model, config, prompts[0], SamplingParams(temperature=0.0, max_tokens=8))  # warm-up
+    t = time.perf_counter()
+    generate(model, config, prompts[0], params)
+    torch.mps.synchronize()
+    print(f"Qwen2.5-0.5B fp16 MPS single-stream: {128 / (time.perf_counter() - t):.1f} tokens/s")
