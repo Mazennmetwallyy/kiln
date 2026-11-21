@@ -22,7 +22,7 @@ include = ["kiln*"]
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "SIM", "C4", "UP", "RUF"]
