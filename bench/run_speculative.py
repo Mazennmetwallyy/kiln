@@ -75,7 +75,8 @@ def main() -> None:
             r, outs = run(target, tconfig, draft, dconfig, prompts, out_lens, k, batch)
             if k == 0:
                 baseline = outs
-            r["identical_to_target_alone"] = sum(x == y for x, y in zip(outs, baseline, strict=True)) if baseline else None
+            same = sum(x == y for x, y in zip(outs, baseline, strict=True)) if baseline else None
+            r["identical_to_target_alone"] = same
             out["runs"].append(r)
             acc = f"{r['acceptance']:.2f}" if r["acceptance"] is not None else "  - "
             print(f"batch {batch} k={k}: {r['tok_per_s']:6.1f} tok/s, acceptance {acc}, "
