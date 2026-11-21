@@ -45,6 +45,9 @@ class ModelConfig:
             raise UnsupportedModelError(f"unsupported architecture {archs}; Kiln supports {list(_ARCHES)}")
         if raw.get("rope_scaling"):
             raise UnsupportedModelError(f"rope_scaling={raw['rope_scaling']!r} is not implemented")
+        if raw.get("use_sliding_window"):
+            raise UnsupportedModelError("sliding-window attention is not implemented")
+        rope_theta = _rope_theta(raw)
 
         num_heads = raw["num_attention_heads"]
         head_dim = raw.get("head_dim") or raw["hidden_size"] // num_heads
@@ -68,10 +71,22 @@ class ModelConfig:
             num_heads=num_heads,
             num_kv_heads=raw.get("num_key_value_heads", num_heads),
             head_dim=head_dim,
-            rope_theta=float(raw.get("rope_theta", 10000.0)),
+            rope_theta=rope_theta,
             rms_norm_eps=float(raw["rms_norm_eps"]),
             max_position_embeddings=raw["max_position_embeddings"],
             tie_word_embeddings=bool(raw.get("tie_word_embeddings", False)),
             attention_bias=attention_bias,
             eos_token_ids=tuple(eos),
         )
+
+
+def _rope_theta(raw: dict) -> float:
+    """Read theta from either the classic top-level key or transformers>=5's `rope_parameters` dict."""
+    params = raw.get("rope_parameters")
+    if params:
+        if params.get("rope_type", "default") != "default":
+            raise UnsupportedModelError(f"rope_type={params['rope_type']!r} is not implemented")
+        return float(params["rope_theta"])
+    if "rope_theta" in raw:
+        return float(raw["rope_theta"])
+    raise UnsupportedModelError("config has no rope_theta; refusing to guess a default")

@@ -59,3 +59,27 @@ def test_rope_scaling_rejected(tmp_path):
 def test_unsupported_arch(tmp_path):
     with pytest.raises(UnsupportedModelError):
         ModelConfig.from_hf_dir(write(tmp_path, dict(SMOL, architectures=["GPT2LMHeadModel"])))
+
+
+def test_rope_parameters_format(tmp_path):
+    # transformers >= 5 writes rope settings as a nested dict instead of a top-level rope_theta.
+    cfg = {k: v for k, v in SMOL.items() if k != "rope_theta"}
+    cfg["rope_parameters"] = {"rope_theta": 500000.0, "rope_type": "default"}
+    assert ModelConfig.from_hf_dir(write(tmp_path, cfg)).rope_theta == 500000.0
+
+
+def test_rope_parameters_scaled_type_rejected(tmp_path):
+    cfg = dict(SMOL, rope_parameters={"rope_theta": 500000.0, "rope_type": "llama3", "factor": 8.0})
+    with pytest.raises(UnsupportedModelError):
+        ModelConfig.from_hf_dir(write(tmp_path, cfg))
+
+
+def test_missing_rope_theta_rejected(tmp_path):
+    cfg = {k: v for k, v in SMOL.items() if k != "rope_theta"}
+    with pytest.raises(UnsupportedModelError):
+        ModelConfig.from_hf_dir(write(tmp_path, cfg))
+
+
+def test_sliding_window_rejected(tmp_path):
+    with pytest.raises(UnsupportedModelError):
+        ModelConfig.from_hf_dir(write(tmp_path, dict(QWEN, use_sliding_window=True, sliding_window=4096)))
