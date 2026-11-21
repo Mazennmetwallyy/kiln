@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "hypothesis", "ruff", "mypy", "transformers", "openai", "httpx"]
+bench = ["transformers", "httpx", "matplotlib"]
 
 [project.scripts]
 kiln = "kiln.cli:main"

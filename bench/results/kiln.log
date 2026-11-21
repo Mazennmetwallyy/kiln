@@ -1,0 +1,2 @@
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 2267.60it/s]
+kiln: Qwen/Qwen2.5-0.5B-Instruct on mps (fp16), KV pool 5461 blocks x 16 = 87376 tokens
