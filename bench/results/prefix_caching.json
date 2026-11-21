@@ -1,0 +1,39 @@
+{
+  "meta": {
+    "env": {
+      "cpu": "Apple M2",
+      "memory_gb": "8",
+      "os": "Darwin 27.2.1",
+      "python": "3.10.11",
+      "torch": "2.14.1",
+      "commit": "9331b63"
+    },
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "dtype": "fp16",
+    "num_requests": 64,
+    "system_prompt_tokens": 428,
+    "mean_prompt_tokens": 490.125
+  },
+  "runs": [
+    {
+      "caching": false,
+      "seconds": 52.376138667001214,
+      "output_throughput": 171.49030510068837,
+      "ttft_mean": 10.325042337564128,
+      "ttft_p50": 9.558588521002093,
+      "prompt_tokens": 31368,
+      "cached_tokens": 0,
+      "prefill_tokens_computed": 31368
+    },
+    {
+      "caching": true,
+      "seconds": 37.210126333004155,
+      "output_throughput": 241.38590446099244,
+      "ttft_mean": 2.154025115566128,
+      "ttft_p50": 2.011552854004549,
+      "prompt_tokens": 31368,
+      "cached_tokens": 26064,
+      "prefill_tokens_computed": 5304
+    }
+  ]
+}

@@ -11,7 +11,8 @@ An LLM inference engine built from scratch in Python and PyTorch. It has its own
 | M3 Continuous batching: iteration-level scheduler, chunked prefill, preemption | ✅ | |
 | M4 OpenAI-compatible server: SSE streaming, cancellation, Prometheus metrics | ✅ | |
 | M5 Benchmarks: ShareGPT serving vs Hugging Face, memory, batch scaling | ✅ | |
-| M6 Prefix caching · M7 Speculative decoding · M8 Metal kernel · M9 Visualiser | | |
+| M6 Prefix caching: hash-chained blocks, LRU eviction of cached blocks | ✅ | |
+| M7 Speculative decoding · M8 Metal kernel · M9 Visualiser | | |
 
 **M1 results** (Apple M2, 8 GB):
 - Greedy output is **token-for-token identical to Hugging Face `transformers`** on 12/12 test prompts for both Qwen2.5-0.5B-Instruct and SmolLM2-135M-Instruct (fp32, 64 tokens each). Logits match exactly.
@@ -40,6 +41,18 @@ Kiln's throughput is 2.3× static batching and 5.5× sequential serving. At real
 ![Batch scaling](docs/img/decode_scaling.png)
 
 **Where Kiln is still slower.** On one fixed batch with no arrivals or departures, Hugging Face is faster: 54 vs 27 tok/s for a single request, and 645 vs 451 tok/s at 64. HF attends over one contiguous tensor per layer. Kiln's attention is written in plain PyTorch and has to gather each sequence's K/V out of scattered blocks on every step, and that gather grows with context length (profiled: 51 of 93 ms per step at ~700 tokens of context). Kiln wins the serving benchmark on scheduling, not raw step speed. M8 replaces the gather with a hand-written Metal paged-attention kernel.
+
+## Prefix caching (M6)
+
+The same 64 ShareGPT questions, each behind one shared 428-token system prompt (mean prompt 490 tokens), all submitted at once, in-process, same settings except caching:
+
+| | caching off | caching on |
+|---|---|---|
+| Prompt tokens actually computed | 31,368 | **5,304** (−83%) |
+| Time to first token, mean | 10.3 s | **2.2 s** (4.8× faster) |
+| Total time for all 64 requests | 52.4 s | **37.2 s** (−29%) |
+
+Outputs are identical with caching on and off: the real-model test checks 12 prompts behind a shared system prompt on both Qwen2.5-0.5B and SmolLM2, token for token. Design: [ADR 0004](docs/decisions/0004-prefix-cache-hash-chain.md). Reproduce: `python -m bench.run_prefix --data bench/data/sharegpt_64_seed0.json`.
 
 ## Quickstart
 

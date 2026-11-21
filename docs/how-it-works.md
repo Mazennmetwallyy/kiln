@@ -286,3 +286,40 @@ The first run of the static-batching baseline hung for hours with the GPU idle. 
 - Why does static batching's TTFT equal its end-to-end latency?
 - Kiln is slower than Hugging Face on a fixed batch. Why does it still win the serving benchmark?
 - Why must every system produce exactly the same number of output tokens for the comparison to be fair?
+
+## M6: Prefix caching
+
+### The waste
+An assistant product sends the same system prompt in front of every user message. Without caching, every request recomputes K/V for those identical tokens. In the M6 benchmark that's 428 of a mean 490 prompt tokens: 87% of all prefill is repeated work, and it sits right in front of the first token.
+
+### Content-addressed blocks
+K/V for a token depends on that token *and every token before it*. So a block can only be reused by a request whose entire prefix up to that block is identical, not just the block's own 16 tokens. Kiln gives every full, computed block a key:
+
+```
+key(block i) = hash( key(block i-1), tokens of block i )      # key(block -1) = None
+```
+
+Chaining the parent's key in makes the key stand for the whole prefix. A new request computes the same keys for its prompt and follows the chain until the first miss. Matching blocks are shared (refcount + 1). The request's `num_computed` starts at the cached length, so the scheduler only sends the rest through the model.
+
+A hash can collide, so a hit is checked against the stored parent key and the stored tokens. A collision then becomes a miss and can never produce wrong K/V.
+
+### Keeping freed blocks around
+When the last request using a cached block finishes, the block isn't wiped. It joins an LRU of *evictable* blocks: still holding valid K/V, still findable, but counted as free. Allocation takes truly free blocks first, then evicts the least recently used cached block, dropping its key. So the cache costs no memory that anything else needed, and a popular system prompt stays resident as long as there's room.
+
+### Edge cases the tests pin down
+- **One token is always left to compute.** The first output token is sampled from the last prompt position's logits, so a fully cached prompt still recomputes its last block.
+- **Only full blocks are cached**, and a request writes only after its cached prefix, so shared cached blocks are read-only and need no copy-on-write.
+- **Rollback** (used by M7's speculative decoding) can make a cached block partial again. If this sequence is its only owner, the next write will overwrite it in place, so it's removed from the cache first. If it's shared, the write triggers copy-on-write and the cached copy stays valid.
+- **Preemption** frees a request's blocks, but its full blocks stay cached, so re-admission usually finds most of its own K/V still there.
+- **A Hypothesis state machine** draws prompts from a tiny alphabet so prefixes repeat constantly, interleaves allocate, register, append, fork, rollback and free, and checks after every step that refcounts match block tables, every unused block is free *xor* evictable, and every cached block's stored tokens match what the sequence holding it put there.
+
+### Results
+Prefill computed fell 83% (31,368 → 5,304 tokens) and mean time to first token fell 4.8× (10.3 s → 2.2 s), with identical outputs. Requests admitted in the very first step don't benefit, because nothing is cached until the step that computes the system prompt finishes.
+
+### Questions to be ready for
+- Why must the key include the parent block's key rather than just the block's own tokens?
+- What happens on a hash collision?
+- Why is at least one prompt token always recomputed?
+- Why do cached blocks never need copy-on-write, but rolled-back ones need special handling?
+- Evictable blocks count as free. Why is that safe, and what happens when one is needed?
+- Block-level hashing vs a radix tree (SGLang): what does each give up?

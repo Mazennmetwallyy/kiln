@@ -97,7 +97,8 @@ def test_metrics(server, client):
     client.completions.create(model="tiny", prompt="metrics", max_tokens=3, **GREEDY)
     text = httpx.get(f"{server[0]}/metrics").text
     for name in ["kiln_requests_total", "kiln_generation_tokens_total", "kiln_prompt_tokens_total",
-                 "kiln_time_to_first_token_seconds_bucket", "kiln_kv_blocks_total", "kiln_running_requests"]:
+                 "kiln_time_to_first_token_seconds_bucket", "kiln_kv_blocks_total", "kiln_running_requests",
+                 "kiln_prefix_cache_hit_tokens", "kiln_prefix_cache_query_tokens", "kiln_kv_blocks_cached"]:
         assert name in text, name
     gen = [line for line in text.splitlines() if line.startswith("kiln_generation_tokens_total ")]
     assert gen and float(gen[0].split()[1]) >= 3

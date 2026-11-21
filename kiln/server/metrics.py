@@ -21,6 +21,11 @@ class Metrics:
         self.waiting = Gauge("kiln_waiting_requests", "Requests queued", registry=r)
         self.blocks_used = Gauge("kiln_kv_blocks_used", "KV cache blocks in use", registry=r)
         self.blocks_total = Gauge("kiln_kv_blocks_total", "KV cache blocks in the pool", registry=r)
+        self.blocks_cached = Gauge("kiln_kv_blocks_cached", "Blocks holding reusable prefix K/V", registry=r)
+        self.prefix_query = Gauge("kiln_prefix_cache_query_tokens", "Prompt tokens looked up in the prefix cache",
+                                  registry=r)
+        self.prefix_hit = Gauge("kiln_prefix_cache_hit_tokens", "Prompt tokens served from the prefix cache",
+                                registry=r)
         self.ttft = Histogram("kiln_time_to_first_token_seconds", "Time to first token", registry=r,
                               buckets=_LATENCY_BUCKETS)
         self.itl = Histogram("kiln_inter_token_latency_seconds", "Time between streamed outputs", registry=r,
@@ -36,3 +41,6 @@ class Metrics:
         self.blocks_used.set(stats.num_blocks - stats.num_free_blocks)
         self.blocks_total.set(stats.num_blocks)
         self.preemptions.set(stats.num_preemptions_total)
+        self.blocks_cached.set(stats.num_cached_blocks)
+        self.prefix_query.set(stats.prefix_cache_query_tokens)
+        self.prefix_hit.set(stats.prefix_cache_hit_tokens)

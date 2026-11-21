@@ -182,3 +182,41 @@ def test_one_failing_request_does_not_fail_the_batch(tiny, monkeypatch):
     assert finish == {"bad": "error", "good": "length"}
     assert got["good"] == hf_greedy(hf, PROMPTS["r2"], MAX_TOKENS["r2"])
     assert engine.stats().num_free_blocks == 64
+
+
+SYSTEM = [(11 * j) % 200 + 20 for j in range(21)]  # a 21-token "system prompt" (5 full blocks of 4)
+SHARED = {f"s{i}": [*SYSTEM, *[(5 * i + j) % 90 + 100 for j in range(i + 1)]] for i in range(8)}
+
+
+def shared_greedy(rid):
+    return SamplingParams(temperature=0.0, max_tokens=6 + int(rid[1:]), ignore_eos=True)
+
+
+@pytest.mark.parametrize("num_blocks", [64, 14])  # 14 blocks = 56 slots: forces eviction and preemption
+def test_prefix_caching_shared_system_prompt(tiny, num_blocks):
+    model, config, hf = tiny
+    engine = LLMEngine(model, config, None, num_blocks=num_blocks, block_size=4, max_num_seqs=4)
+    tokens, _ = run_all(engine, SHARED, shared_greedy)
+    for rid, prompt in SHARED.items():
+        assert tokens[rid] == hf_greedy(hf, prompt, 6 + int(rid[1:])), rid
+    stats = engine.stats()
+    assert stats.prefix_cache_hit_tokens >= 20 * (len(SHARED) - 4)  # later admissions hit the 20 cached tokens
+    assert stats.num_free_blocks == num_blocks
+
+
+def test_prefix_caching_off_has_no_hits(tiny):
+    model, config, _ = tiny
+    engine = LLMEngine(model, config, None, num_blocks=64, block_size=4, enable_prefix_caching=False)
+    run_all(engine, SHARED, shared_greedy)
+    assert engine.stats().prefix_cache_hit_tokens == 0
+
+
+def test_identical_prompts_reuse_all_but_last_token(tiny):
+    model, config, hf = tiny
+    engine = LLMEngine(model, config, None, num_blocks=64, block_size=4)
+    prompt = SYSTEM[:17]
+    run_all(engine, {"a": prompt}, lambda _: SamplingParams(temperature=0.0, max_tokens=5, ignore_eos=True))
+    tokens, _ = run_all(engine, {"b": prompt}, lambda _: SamplingParams(temperature=0.0, max_tokens=5,
+                                                                         ignore_eos=True))
+    assert tokens["b"] == hf_greedy(hf, prompt, 5)
+    assert engine.stats().prefix_cache_hit_tokens == 16

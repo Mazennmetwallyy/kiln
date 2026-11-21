@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--max-num-seqs", type=int, default=32)
     sv.add_argument("--max-batched-tokens", type=int, default=512)
     sv.add_argument("--max-context", type=int, default=None)
+    sv.add_argument("--no-prefix-caching", action="store_true", help="recompute shared prompt prefixes every time")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
@@ -99,7 +100,7 @@ def serve(args: argparse.Namespace) -> int:
     num_blocks = PagedKVCache.blocks_for_memory(config, int(args.kv_memory_gb * 2**30), args.block_size, dtype)
     engine = LLMEngine(model, config, tok, num_blocks=num_blocks, block_size=args.block_size,
                        max_num_seqs=args.max_num_seqs, max_batched_tokens=args.max_batched_tokens,
-                       max_context=args.max_context)
+                       max_context=args.max_context, enable_prefix_caching=not args.no_prefix_caching)
     print(f"kiln: {args.model} on {args.device} ({args.dtype or dtype}), KV pool {num_blocks} blocks "
           f"x {args.block_size} = {num_blocks * args.block_size} tokens", file=sys.stderr)
     uvicorn.run(create_app(AsyncEngine(engine), tok, args.model), host=args.host, port=args.port,

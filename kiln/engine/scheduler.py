@@ -46,6 +46,8 @@ class Scheduler:
         self.waiting: deque[Sequence] = deque()
         self.running: list[Sequence] = []  # in admission order
         self.num_preemptions = 0
+        self.prefix_query_tokens = 0  # tokens of admitted sequences
+        self.prefix_hit_tokens = 0  # of which found in the prefix cache
 
     def add(self, seq: Sequence) -> None:
         capacity = self.bm.num_blocks * self.bm.block_size
@@ -82,14 +84,20 @@ class Scheduler:
         while (not out.preempted and self.waiting and budget > 0
                and len(self.running) < self.max_num_seqs):
             seq = self.waiting[0]
-            n = min(seq.num_tokens - seq.num_computed, budget)
-            if not self.bm.can_allocate(n):
+            tokens = seq.tokens
+            cached = self.bm.cached_prefix_len(tokens)  # K/V already in the prefix cache: skip it
+            n = min(len(tokens) - cached, budget)
+            if not self.bm.can_allocate(cached + n, tokens):
                 break  # strict FIFO: don't let smaller requests jump the queue
             self.waiting.popleft()
-            self.bm.allocate(seq.seq_id, n)
+            got = self.bm.allocate(seq.seq_id, cached + n, tokens)
+            assert got == cached
+            seq.num_computed = cached
+            self.prefix_query_tokens += len(tokens)
+            self.prefix_hit_tokens += cached
             seq.status = SeqStatus.RUNNING
             self.running.append(seq)
-            out.scheduled.append(ScheduledSeq(seq, n, 0))
+            out.scheduled.append(ScheduledSeq(seq, n, cached))
             budget -= n
         return out
 

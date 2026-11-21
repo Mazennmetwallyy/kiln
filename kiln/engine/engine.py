@@ -42,18 +42,21 @@ class EngineStats:
     num_free_blocks: int
     num_blocks: int
     num_preemptions_total: int
+    prefix_cache_query_tokens: int = 0
+    prefix_cache_hit_tokens: int = 0
+    num_cached_blocks: int = 0
 
 
 class LLMEngine:
     def __init__(self, model: nn.Module, config: ModelConfig, tokenizer: Tokenizer | None, num_blocks: int,
                  block_size: int = 16, max_num_seqs: int = 32, max_batched_tokens: int = 512,
-                 max_context: int | None = None):
+                 max_context: int | None = None, enable_prefix_caching: bool = True):
         self.model = model
         self.config = config
         self.tokenizer = tokenizer
         weight = next(model.parameters())
         self.device = weight.device
-        self.bm = BlockManager(num_blocks, block_size)
+        self.bm = BlockManager(num_blocks, block_size, enable_prefix_caching=enable_prefix_caching)
         self.cache = PagedKVCache(config, num_blocks, block_size, weight.dtype, self.device)
         self.scheduler = Scheduler(self.bm, max_num_seqs, max_batched_tokens)
         self.max_context = config.max_position_embeddings
@@ -96,8 +99,10 @@ class LLMEngine:
         return self.scheduler.has_unfinished() or bool(self._finished_now)
 
     def stats(self) -> EngineStats:
-        return EngineStats(len(self.scheduler.running), len(self.scheduler.waiting), self.bm.num_free_blocks,
-                           self.bm.num_blocks, self.scheduler.num_preemptions)
+        sch = self.scheduler
+        return EngineStats(len(sch.running), len(sch.waiting), self.bm.num_free_blocks, self.bm.num_blocks,
+                           sch.num_preemptions, sch.prefix_query_tokens, sch.prefix_hit_tokens,
+                           self.bm.num_cached_blocks)
 
     @torch.no_grad()
     def step(self) -> list[RequestOutput]:
@@ -125,6 +130,9 @@ class LLMEngine:
         rows = torch.tensor([r for r, _ in to_sample], dtype=torch.long, device=self.device)
         logits = self.model(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
                             PagedContext(self.cache, meta), logits_indices=rows)
+        for s in plan.scheduled:  # newly completed full blocks join the prefix cache
+            if self.bm.needs_register(s.seq.seq_id, s.seq.num_computed):
+                self.bm.register_computed(s.seq.seq_id, s.seq.tokens, s.seq.num_computed)
         for (_, seq), token in zip(to_sample, self._sample_all(logits, [s for _, s in to_sample]), strict=True):
             outputs.append(self._process_token(seq, token))
         return outputs

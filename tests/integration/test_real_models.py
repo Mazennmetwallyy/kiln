@@ -95,6 +95,51 @@ def test_fp32_engine_all_prompts_at_once(repo):
     gc.collect()
 
 
+SYSTEM = ("You are a careful assistant for an engineering team. Answer precisely, prefer short sentences, "
+          "state assumptions explicitly, and when a question is ambiguous say which reading you chose. "
+          "Use metric units. Never invent citations, numbers or names you are not sure about.")
+
+
+def _run_engine(engine, prompts, params, first_alone):
+    """Run one request to completion first (so its prefix is cached), then all the others together."""
+    got: dict[str, list[int]] = {str(i): [] for i in range(len(prompts))}
+    waves = [[0], list(range(1, len(prompts)))] if first_alone else [list(range(len(prompts)))]
+    for wave in waves:
+        for i in wave:
+            engine.add_request(str(i), prompts[i], params)
+        while engine.has_unfinished():
+            for out in engine.step():
+                got[out.request_id] += out.new_token_ids
+    return [got[str(i)] for i in range(len(prompts))]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("repo", MODELS)
+def test_fp32_prefix_caching_matches_no_caching(repo):
+    """12 prompts behind one shared system prompt: reusing its cached K/V must not change any output."""
+    path, _, _, _ = _references(repo)
+    tok = Tokenizer.from_hf_dir(path)
+    prompts = [tok.encode(tok.apply_chat_template([{"role": "system", "content": SYSTEM},
+                                                   {"role": "user", "content": p}]), add_special_tokens=False)
+               for p in PROMPTS]
+    model, config = load_model(path, dtype=torch.float32, device="cpu")
+    params = SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True)
+    outs = {}
+    for caching in (False, True):
+        engine = LLMEngine(model, config, None, num_blocks=256, block_size=16, max_batched_tokens=256,
+                           enable_prefix_caching=caching)
+        outs[caching] = _run_engine(engine, prompts, params, first_alone=True)
+        stats = engine.stats()
+    shared = len(tok.encode(tok.apply_chat_template([{"role": "system", "content": SYSTEM}]),
+                            add_special_tokens=False))
+    print(f"\n{repo}: shared prefix ~{shared} tokens; hit {stats.prefix_cache_hit_tokens} of "
+          f"{stats.prefix_cache_query_tokens} prompt tokens")
+    assert stats.prefix_cache_hit_tokens >= (len(prompts) - 1) * (shared // 16 - 1) * 16
+    assert outs[True] == outs[False]
+    del model
+    gc.collect()
+
+
 @pytest.mark.mps
 @pytest.mark.slow
 def test_qwen_fp16_mps_logits_close():
