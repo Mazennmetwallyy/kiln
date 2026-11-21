@@ -1,0 +1,9 @@
+hf-static      rate= 0.5:    54.1 tok/s, TTFT p50 6.85s, ITL p50 nanms, e2e p50 6.8s, failed 0
+hf-static      rate= 1.0:    95.0 tok/s, TTFT p50 15.76s, ITL p50 nanms, e2e p50 15.8s, failed 0
+hf-static      rate= 2.0:   123.6 tok/s, TTFT p50 29.53s, ITL p50 nanms, e2e p50 29.5s, failed 0
+hf-static      rate= inf:   131.4 tok/s, TTFT p50 35.35s, ITL p50 nanms, e2e p50 35.4s, failed 0
+hf-sequential  rate= 0.5:    48.9 tok/s, TTFT p50 2.26s, ITL p50 17ms, e2e p50 4.4s, failed 0
+hf-sequential  rate= 1.0:    55.1 tok/s, TTFT p50 26.56s, ITL p50 17ms, e2e p50 28.2s, failed 0
+hf-sequential  rate= 2.0:    54.6 tok/s, TTFT p50 44.12s, ITL p50 17ms, e2e p50 46.2s, failed 0
+hf-sequential  rate= inf:    55.6 tok/s, TTFT p50 63.24s, ITL p50 17ms, e2e p50 65.3s, failed 0
+done

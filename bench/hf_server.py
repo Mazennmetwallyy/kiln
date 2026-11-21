@@ -86,7 +86,7 @@ def create_app(model: Any, mode: str, max_batch: int = 16, batch_wait_s: float =
                     break
                 try:
                     batch.append(await asyncio.wait_for(pending.get(), timeout))
-                except TimeoutError:
+                except asyncio.TimeoutError:  # not the builtin TimeoutError before Python 3.11
                     break
             try:
                 outs = await asyncio.to_thread(static_batch_generate, model, [b[0] for b in batch],

@@ -1,0 +1,4 @@
+kiln           rate= 0.5:    57.9 tok/s, TTFT p50 0.09s, ITL p50 31ms, e2e p50 4.4s, failed 0
+kiln           rate= 1.0:   110.5 tok/s, TTFT p50 0.09s, ITL p50 34ms, e2e p50 5.5s, failed 0
+kiln           rate= 2.0:   183.5 tok/s, TTFT p50 0.12s, ITL p50 52ms, e2e p50 7.7s, failed 0
+kiln           rate= inf:   306.2 tok/s, TTFT p50 2.11s, ITL p50 130ms, e2e p50 21.4s, failed 0

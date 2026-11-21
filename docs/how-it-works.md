@@ -263,3 +263,26 @@ Every test drives the server with the official `openai` Python client, so "OpenA
 - Why must validation finish before a streaming response starts?
 - What happens, step by step, when a client disconnects mid-stream?
 - TTFT vs inter-token latency: what does each measure, and what makes each worse?
+
+## M5: Benchmarks
+
+### What is measured, and how
+- **Workload.** 64 conversations sampled (seed 0) from ShareGPT V3: real user questions with the length of the real answer as `max_tokens`. Prompts are chat-templated and tokenized once, so every system sees identical token ids. Generation ignores EOS, so every system produces exactly the same number of tokens.
+- **Same interface for everyone.** Kiln and both Hugging Face baselines (`bench/hf_server.py`) sit behind the same streaming `/v1/completions` endpoint. The client measures from outside, so HTTP and tokenization overhead are counted for all three.
+- **Open-loop load.** Requests arrive as a Poisson process at 0.5, 1 and 2 per second, then all at once. Open-loop means arrivals don't wait for earlier answers. That's what real traffic does, and it's what exposes queueing. A closed loop (send the next request when one finishes) hides queueing delay and flatters slow systems.
+- **Metrics.** Output throughput, time to first token (TTFT), inter-token latency (ITL), end-to-end latency. Medians in the README, p99 in `bench/results/serving.json`.
+
+### Reading the results
+- **TTFT is where continuous batching shows most.** HF static batching can't return anything until the whole padded batch is done, so its TTFT equals its end-to-end time. HF sequential makes each request wait for every earlier one. Kiln admits a new request at the next step (~30–130 ms later) and prefills it in chunks alongside running decodes.
+- **Throughput saturates differently.** Sequential is flat at ~55 tok/s, one stream's decode speed. Static batching rises to ~130 tok/s but wastes compute on padding and on finished sequences waiting for the longest one. Kiln reaches 306 tok/s because finished requests leave and new ones join every step, so the batch stays full.
+- **Memory.** Paging allocates 16 tokens at a time, so a request only holds memory for tokens it actually has. Reserving each request's worst case (prompt + max_tokens) fits 2.4× fewer requests in the same budget. Reserving the context window fits ~30× fewer.
+- **Where Kiln loses.** On a fixed batch Hugging Face is ~1.4–2× faster per step. Its attention reads one contiguous K/V tensor. Kiln's torch-only paged attention gathers each sequence's blocks into a temporary tensor per layer per step, and adds Python bookkeeping per step. Continuous batching more than makes up for it under real load, but the gap is real and is the motivation for M8's kernel.
+
+### A bug the benchmark found in the baseline
+The first run of the static-batching baseline hung for hours with the GPU idle. Its batcher waits up to 50 ms for more requests using `asyncio.wait_for` and caught `TimeoutError`. On Python 3.10, `asyncio.wait_for` raises `asyncio.TimeoutError`, a different class (they were unified in 3.11). The first partial batch killed the batcher task silently, and every later request awaited a future nobody would resolve. A regression test (`tests/bench/test_hf_server_batcher.py`) sends fewer requests than a full batch and requires them to finish.
+
+### Questions to be ready for
+- Why open-loop load rather than closed-loop? What would a closed loop hide?
+- Why does static batching's TTFT equal its end-to-end latency?
+- Kiln is slower than Hugging Face on a fixed batch. Why does it still win the serving benchmark?
+- Why must every system produce exactly the same number of output tokens for the comparison to be fair?
