@@ -325,3 +325,80 @@ Prefill computed fell 83% (31,368 → 5,304 tokens) and mean time to first token
 - Block-level hashing vs a radix tree (SGLang): what does each give up?
 - Why must the block key be a cryptographic hash? What could an attacker do with a 64-bit one?
 - How can a prefix cache leak information between users, and what are the mitigations?
+
+## M7: Speculative decoding
+
+### Why it can help
+At batch 1, a decode step is limited by reading the weights and by per-layer overhead, not by arithmetic. Scoring 5 tokens costs about the same as scoring 1 (62 vs 55 ms for Qwen2.5-1.5B on the M2). So if a cheap model can guess the next few tokens, the big model can check them all in one pass and keep the ones it agrees with.
+
+### The algorithm (`kiln/spec/rejection.py`)
+For each draft token d_i, sampled from the draft's distribution q_i, with the target's distribution p_i computed in the verification pass:
+- accept d_i with probability min(1, p_i(d_i) / q_i(d_i));
+- at the first rejection, sample a replacement from norm(max(0, p_i − q_i)) and stop;
+- if all k are accepted, sample one bonus token from p_k, which the target computed anyway.
+
+Every emitted token is then distributed exactly as the target alone would have sampled it. The accepted part contributes min(p, q) and the residual contributes p − min(p, q), which together give p. Greedy decoding is the special case where p and q are one-hot: accept while the draft equals the target's argmax. p and q must be the *warped* distributions (temperature, top-k, top-p), the ones actually sampled from, so `sampling.probs()` is shared by the sampler and the verifier.
+
+### Inside the continuous batch (`LLMEngine._speculative_step`)
+- Kiln speculates only on steps where every scheduled request is decoding. A step with any prefill runs normally, and the draft processes the same tokens so its cache stays in sync.
+- For each request, k is capped so that k accepted tokens plus the bonus token can't exceed `max_tokens`, and it drops to 0 if the pool can't reserve k more slots.
+- The draft runs k passes. The first may be ragged, because the draft can trail by a token (below).
+- The target runs **one** pass over [last token, d1 … dk] for every request.
+- After verification, `bm.rollback(k − j)` returns the rejected slots in both caches. Emitted tokens go through the normal stop/EOS/`max_tokens` checks one at a time, so a stop in the middle of an accepted run discards the rest.
+
+### Draft lag
+When all k drafts are accepted, d_k was never fed to the draft, so the draft's cache is one token behind. `Sequence.draft_computed` tracks this, and every draft forward feeds `tokens[draft_computed:]`. A block joins the prefix cache only once *both* caches hold it, at `min(num_computed, draft_computed)`.
+
+### Testing it
+- Greedy speculative output must equal target-only output. That's tested with an identical draft (everything accepted), a slightly perturbed draft (partial acceptance) and an unrelated draft (almost nothing accepted), for k = 1, 3 and 5, and together with preemption, chunked prefill, prefix caching and mid-acceptance stops.
+- Chi-square tests over 20,000 trials check that the first *and* second emitted tokens follow p. They include drafts that put zero probability on tokens the target wants, and targets that put zero probability on tokens the draft proposes.
+- A deliberate break (removing the rollback) has to fail the tests. At first it didn't: the tiny random test model repeated one token whatever its context, so wrong K/V never showed in the output. Scaling its weights gave varied, context-sensitive output, and the break was then caught.
+
+### What it gave on this machine
+Correctness held: 12/12 identical on SmolLM2 135M → 360M in fp32. Speed only modestly improved: 1.28× at k = 2, batch 1, and slower at batch 4. The draft costs about 0.45× of a target step, because both are overhead-bound at batch 1, so the ceiling is roughly tokens-per-forward / (0.45k + 1). On top of that, two models that don't both fit in 8 GB of RAM swap. The README gives the numbers and the profile.
+
+### Questions to be ready for
+- Why does accepting with probability min(1, p/q) and resampling from max(0, p − q) give exactly p?
+- Why must q be the distribution after temperature/top-k/top-p?
+- Why is the bonus token free?
+- When does speculative decoding stop paying off? (Draft cost ratio, acceptance rate, batch size.)
+- Why can't the draft's cache simply be a second block manager?
+- What happens to the KV cache when 2 of 4 drafts are rejected?
+
+## M8: A Metal paged-attention kernel
+
+### Why attention, and why decode
+In a decode step, every request contributes one query and has to read its whole K/V history. The PyTorch path gathers that history out of scattered blocks (`k_pool[slots]`) into a temporary tensor padded to the longest sequence in the batch, in every layer. Under serving load that copy dominated the step: 51 of 93 ms at about 700 tokens of context.
+
+### The kernel (`kiln/attention/metal.py`)
+- **Grid.** One threadgroup of 128 threads (4 SIMD groups of 32) per (sequence, query head, context partition). Thread *i* of a SIMD group owns dimensions [i·D/32, (i+1)·D/32) of the head.
+- **Dot products.** For each token the kernel looks up its slot through the block table, then each thread multiplies its slice of q and k. `simd_sum` adds the 32 partial sums in hardware. The 32 threads read one K vector together, so the loads are contiguous.
+- **Online softmax.** Each SIMD group keeps a running max m, a running denominator l and a running weighted sum of V. When a new score raises the max, everything accumulated so far is multiplied by exp(m_old − m_new). The scores never exist as a tensor.
+- **Merging.** The 4 SIMD groups merge through threadgroup memory, each rescaled to the common max.
+- **Split-K.** The first version had one threadgroup per (sequence, head), which is 14 threadgroups for a single request: far too few to fill the GPU. It was *slower* than PyTorch at long contexts. Splitting the context into 256-token partitions, each producing an unnormalised (m, l, acc), plus a small second kernel to merge partitions, made it faster everywhere. This is the FlashDecoding idea.
+- GQA is just `kv_head = h / (H / Hkv)`, so no K/V is copied per query head.
+
+### Results
+- **Attention alone:** 1.7–2.8× faster.
+- **Whole decode step:** up to 1.5× faster (batch 32 at 1,024 tokens: 129.5 → 86.5 ms).
+- **Serving:** 311 → 569 tok/s with all 64 requests at once, because the kernel never pays for padding.
+
+At batch 1 the step barely changes: attention is under 1 ms of a roughly 27 ms step.
+
+### Things found on the way
+- **Hundreds of dtype round trips per token.** RoPE cast q and k to fp32 and back in every layer, and each cast is a separate GPU kernel: 302 casts per decode step. Computing cos/sin once per forward in the model's dtype, as Hugging Face does, halved that.
+- **Why Hugging Face's `generate` is still faster at batch 1.** Both models launch a similar number of operations, and a Kiln forward pass is in fact a little quicker than a direct Hugging Face forward call. But `generate` defers its stop check, so it never waits for the GPU between steps, and CPU dispatch overlaps GPU execution. A continuous-batching scheduler needs each step's tokens before it can plan the next step. Overlapping the two (async scheduling) is the next step.
+
+### Questions to be ready for
+- What does the online softmax store, and why is it numerically safe?
+- Why is the q·k product a `simd_sum`, and what makes the K loads coalesced?
+- Why was the first kernel slower than PyTorch for one long request, and how does split-K fix it?
+- Why is the gain bigger under serving load than in a fixed batch?
+- What would you do next for speed? (`simdgroup_matrix`, `half4` loads, several query heads per threadgroup for GQA, async scheduling.)
+
+## M9: The live KV-cache view
+
+`kiln serve --enable-viz` serves `/viz`, a single page in plain HTML, CSS and JS with no build step, plus `/kv` (one snapshot) and `/kv/stream` (Server-Sent Events).
+- **Snapshots.** After a step, the engine thread takes a snapshot of every block's state (free, used by one request, shared, cached-and-evictable) and owner, at most 10 times a second and always when a request finishes. HTTP handlers only read the latest snapshot under a lock, so watching never stalls the engine.
+- **Colour encodes state, not owner.** 64 requests can't get distinct colours, so the owner is shown on hover and in the request list, and hovering a request outlines its blocks.
+- **Opt-in.** It's off by default. It reveals which requests share which prefixes, which is exactly the cross-user side channel ADR 0004 warns about. An automated security review flagged it, and the fix was to make it opt-in.

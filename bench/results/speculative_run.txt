@@ -1,0 +1,9 @@
+batch 1 k=0:   12.5 tok/s, acceptance   - , 1.00 tokens/target forward, identical 12/12
+batch 1 k=1:   10.1 tok/s, acceptance 0.76, 1.74 tokens/target forward, identical 10/12
+batch 1 k=2:   16.0 tok/s, acceptance 0.68, 2.32 tokens/target forward, identical 10/12
+batch 1 k=4:   11.0 tok/s, acceptance 0.55, 3.09 tokens/target forward, identical 10/12
+batch 4 k=0:   41.9 tok/s, acceptance   - , 3.01 tokens/target forward, identical 12/12
+batch 4 k=1:   28.9 tok/s, acceptance 0.76, 4.91 tokens/target forward, identical 10/12
+batch 4 k=2:   29.9 tok/s, acceptance 0.69, 6.34 tokens/target forward, identical 11/12
+batch 4 k=4:   27.9 tok/s, acceptance 0.54, 7.85 tokens/target forward, identical 8/12
+vm.swapusage: total = 8192.00M  used = 6798.56M  free = 1393.44M  (encrypted)

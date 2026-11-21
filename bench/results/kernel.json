@@ -1,0 +1,89 @@
+{
+  "meta": {
+    "env": {
+      "cpu": "Apple M2",
+      "memory_gb": "8",
+      "os": "Darwin 27.2.1",
+      "python": "3.10.11",
+      "torch": "2.14.1",
+      "commit": "ad1c15d"
+    },
+    "model": "Qwen/Qwen2.5-0.5B-Instruct",
+    "dtype": "fp16",
+    "block_size": 16
+  },
+  "runs": [
+    {
+      "batch": 1,
+      "context": 128,
+      "step_ms_torch": 29.325354100001277,
+      "attn_ms_torch": 0.12196249997941777,
+      "step_ms_metal": 29.254587499599438,
+      "attn_ms_metal": 0.055971660040086135
+    },
+    {
+      "batch": 1,
+      "context": 512,
+      "step_ms_torch": 29.792754099617014,
+      "attn_ms_torch": 0.22388500001397915,
+      "step_ms_metal": 29.643579199910164,
+      "attn_ms_metal": 0.08081417996436357
+    },
+    {
+      "batch": 1,
+      "context": 1024,
+      "step_ms_torch": 30.342137499974342,
+      "attn_ms_torch": 0.28151666003395803,
+      "step_ms_metal": 29.73669169950881,
+      "attn_ms_metal": 0.10694167998735793
+    },
+    {
+      "batch": 1,
+      "context": 2048,
+      "step_ms_torch": 34.64512909995392,
+      "attn_ms_torch": 0.3105833400331903,
+      "step_ms_metal": 31.55984580007498,
+      "attn_ms_metal": 0.1615283399587497
+    },
+    {
+      "batch": 8,
+      "context": 512,
+      "step_ms_torch": 38.92256670005736,
+      "attn_ms_torch": 0.49116750000393955,
+      "step_ms_metal": 33.32507919985801,
+      "attn_ms_metal": 0.28710334008792415
+    },
+    {
+      "batch": 8,
+      "context": 2048,
+      "step_ms_torch": 68.97843749975436,
+      "attn_ms_torch": 1.7216016800375655,
+      "step_ms_metal": 49.14656670007389,
+      "attn_ms_metal": 0.8975766600633506
+    },
+    {
+      "batch": 32,
+      "context": 256,
+      "step_ms_torch": 64.00717910000822,
+      "attn_ms_torch": 1.1521291600365657,
+      "step_ms_metal": 55.712525000126334,
+      "attn_ms_metal": 0.5166841601021588
+    },
+    {
+      "batch": 32,
+      "context": 512,
+      "step_ms_torch": 80.43497920007212,
+      "attn_ms_torch": 1.7302324999764096,
+      "step_ms_metal": 66.65888330026064,
+      "attn_ms_metal": 0.9575758400023915
+    },
+    {
+      "batch": 32,
+      "context": 1024,
+      "step_ms_torch": 129.46395420003682,
+      "attn_ms_torch": 3.849953339959029,
+      "step_ms_metal": 86.49621660006233,
+      "attn_ms_metal": 1.7670591799833346
+    }
+  ]
+}

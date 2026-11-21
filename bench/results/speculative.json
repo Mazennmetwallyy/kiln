@@ -1,0 +1,92 @@
+{
+  "meta": {
+    "env": {
+      "cpu": "Apple M2",
+      "memory_gb": "8",
+      "os": "Darwin 27.2.1",
+      "python": "3.10.11",
+      "torch": "2.14.1",
+      "commit": "8d394a5"
+    },
+    "target": "Qwen/Qwen2.5-1.5B-Instruct",
+    "draft": "Qwen/Qwen2.5-0.5B-Instruct",
+    "dtype": "fp16",
+    "device": "mps",
+    "num_prompts": 12,
+    "output_tokens": 1154
+  },
+  "runs": [
+    {
+      "k": 0,
+      "batch": 1,
+      "seconds": 92.67572708400257,
+      "tok_per_s": 12.45201992269236,
+      "acceptance": null,
+      "tokens_per_target_forward": 1.0,
+      "identical_to_target_alone": 12
+    },
+    {
+      "k": 1,
+      "batch": 1,
+      "seconds": 113.69634383299854,
+      "tok_per_s": 10.149842651888953,
+      "acceptance": 0.7612403100775194,
+      "tokens_per_target_forward": 1.7405731523378583,
+      "identical_to_target_alone": 10
+    },
+    {
+      "k": 2,
+      "batch": 1,
+      "seconds": 72.21530491600424,
+      "tok_per_s": 15.979992071517964,
+      "acceptance": 0.6840458811261731,
+      "tokens_per_target_forward": 2.317269076305221,
+      "identical_to_target_alone": 10
+    },
+    {
+      "k": 4,
+      "batch": 1,
+      "seconds": 105.37009445799777,
+      "tok_per_s": 10.951874020194632,
+      "acceptance": 0.5527246992215145,
+      "tokens_per_target_forward": 3.0938337801608577,
+      "identical_to_target_alone": 10
+    },
+    {
+      "k": 0,
+      "batch": 4,
+      "seconds": 27.511227875002078,
+      "tok_per_s": 41.94651017552639,
+      "acceptance": null,
+      "tokens_per_target_forward": 3.0052083333333335,
+      "identical_to_target_alone": 12
+    },
+    {
+      "k": 1,
+      "batch": 4,
+      "seconds": 39.922230500000296,
+      "tok_per_s": 28.906200519031405,
+      "acceptance": 0.7612403100775194,
+      "tokens_per_target_forward": 4.910638297872341,
+      "identical_to_target_alone": 10
+    },
+    {
+      "k": 2,
+      "batch": 4,
+      "seconds": 38.64945354199881,
+      "tok_per_s": 29.858119436177656,
+      "acceptance": 0.6872384937238494,
+      "tokens_per_target_forward": 6.34065934065934,
+      "identical_to_target_alone": 11
+    },
+    {
+      "k": 4,
+      "batch": 4,
+      "seconds": 41.417362957996374,
+      "tok_per_s": 27.862710650369866,
+      "acceptance": 0.541958041958042,
+      "tokens_per_target_forward": 7.850340136054422,
+      "identical_to_target_alone": 8
+    }
+  ]
+}

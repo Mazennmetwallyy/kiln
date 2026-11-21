@@ -1,0 +1,4 @@
+kiln-metal     rate= 0.5:    58.2 tok/s, TTFT p50 0.08s, ITL p50 29ms, e2e p50 4.2s, failed 0
+kiln-metal     rate= 1.0:   111.2 tok/s, TTFT p50 0.07s, ITL p50 29ms, e2e p50 4.4s, failed 0
+kiln-metal     rate= 2.0:   198.6 tok/s, TTFT p50 0.08s, ITL p50 32ms, e2e p50 5.1s, failed 0
+kiln-metal     rate= inf:   568.7 tok/s, TTFT p50 0.82s, ITL p50 70ms, e2e p50 10.6s, failed 0
