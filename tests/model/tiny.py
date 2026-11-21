@@ -27,5 +27,9 @@ def make_tiny_hf_model(arch: str, tmp_path: Path, tied: bool = True, seed: int =
         for name, p in model.named_parameters():
             if "norm" in name or name.endswith("bias"):
                 p.add_(torch.randn_like(p) * 0.1)
+            # Default init is so small that greedy decoding repeats one token forever, and a test can't
+            # tell right K/V from wrong. Scaled-up projections give varied, context-sensitive output.
+            if "proj" in name and name.endswith("weight"):
+                p.mul_(8.0)
     model.save_pretrained(tmp_path, safe_serialization=True)
     return tmp_path, model

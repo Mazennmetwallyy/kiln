@@ -4,6 +4,12 @@ Every call to `step()` runs the model once over a ragged batch that can mix prom
 and single next tokens (decode) from many requests. Requests join and leave between steps, so a
 finished request's slot is reused at once. That's continuous batching, versus static batching where
 the whole batch waits for its slowest member.
+
+With a draft model (speculative decoding), a step where every request is decoding becomes: the draft
+proposes k tokens per request (k cheap forwards), the target scores them all in one forward, and
+rejection sampling keeps the longest acceptable prefix plus one token from the target. The draft has
+its own KV pool addressed by the *same* block tables, so allocation, copy-on-write, preemption,
+rollback and prefix caching cover both caches at once.
 """
 
 from __future__ import annotations
@@ -22,7 +28,8 @@ from kiln.engine.scheduler import Scheduler
 from kiln.engine.sequence import SeqStatus, Sequence
 from kiln.engine.text import TextStreamer
 from kiln.model.config import ModelConfig
-from kiln.sampling import SamplingParams, sample
+from kiln.sampling import SamplingParams, probs, sample
+from kiln.spec.rejection import verify
 from kiln.tokenizer import Tokenizer
 
 
@@ -45,12 +52,17 @@ class EngineStats:
     prefix_cache_query_tokens: int = 0
     prefix_cache_hit_tokens: int = 0
     num_cached_blocks: int = 0
+    spec_proposed_tokens: int = 0  # draft tokens offered to the target
+    spec_accepted_tokens: int = 0  # of which the target accepted
+    num_target_forwards: int = 0
 
 
 class LLMEngine:
     def __init__(self, model: nn.Module, config: ModelConfig, tokenizer: Tokenizer | None, num_blocks: int,
                  block_size: int = 16, max_num_seqs: int = 32, max_batched_tokens: int = 512,
-                 max_context: int | None = None, enable_prefix_caching: bool = True):
+                 max_context: int | None = None, enable_prefix_caching: bool = True,
+                 draft_model: nn.Module | None = None, draft_config: ModelConfig | None = None,
+                 num_speculative_tokens: int = 0):
         self.model = model
         self.config = config
         self.tokenizer = tokenizer
@@ -58,6 +70,18 @@ class LLMEngine:
         self.device = weight.device
         self.bm = BlockManager(num_blocks, block_size, enable_prefix_caching=enable_prefix_caching)
         self.cache = PagedKVCache(config, num_blocks, block_size, weight.dtype, self.device)
+        self.draft = draft_model
+        self.k = num_speculative_tokens
+        self.draft_cache: PagedKVCache | None = None
+        if draft_model is not None:
+            if draft_config is None or self.k < 1:
+                raise ValueError("a draft model needs its config and num_speculative_tokens >= 1")
+            if draft_config.vocab_size != config.vocab_size:
+                raise ValueError(f"draft vocab ({draft_config.vocab_size}) must equal the target's "
+                                 f"({config.vocab_size}): both models must use the same tokenizer")
+            dweight = next(draft_model.parameters())
+            self.draft_cache = PagedKVCache(draft_config, num_blocks, block_size, dweight.dtype, self.device)
+        self.spec_proposed = self.spec_accepted = self.target_forwards = 0
         self.scheduler = Scheduler(self.bm, max_num_seqs, max_batched_tokens)
         self.max_context = config.max_position_embeddings
         if max_context is not None:
@@ -102,7 +126,8 @@ class LLMEngine:
         sch = self.scheduler
         return EngineStats(len(sch.running), len(sch.waiting), self.bm.num_free_blocks, self.bm.num_blocks,
                            sch.num_preemptions, sch.prefix_query_tokens, sch.prefix_hit_tokens,
-                           self.bm.num_cached_blocks)
+                           self.bm.num_cached_blocks, self.spec_proposed, self.spec_accepted,
+                           self.target_forwards)
 
     @torch.no_grad()
     def step(self) -> list[RequestOutput]:
@@ -110,8 +135,11 @@ class LLMEngine:
         plan = self.scheduler.schedule()
         if not plan.scheduled:
             return outputs
-        if plan.copies:
-            self.cache.copy_blocks(plan.copies)
+        self._copy_blocks(plan.copies)
+        self.target_forwards += 1
+        if self.draft is not None and all(s.num_tokens == 1 and s.start == s.seq.num_tokens - 1
+                                          for s in plan.scheduled):
+            return outputs + self._speculative_step([s.seq for s in plan.scheduled])
 
         # Flatten every scheduled sequence's new tokens into one stream.
         ids: list[int] = []
@@ -130,12 +158,148 @@ class LLMEngine:
         rows = torch.tensor([r for r, _ in to_sample], dtype=torch.long, device=self.device)
         logits = self.model(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
                             PagedContext(self.cache, meta), logits_indices=rows)
+        if self.draft is not None:
+            self._draft_catch_up([s.seq for s in plan.scheduled])
         for s in plan.scheduled:  # newly completed full blocks join the prefix cache
-            if self.bm.needs_register(s.seq.seq_id, s.seq.num_computed):
-                self.bm.register_computed(s.seq.seq_id, s.seq.tokens, s.seq.num_computed)
+            self._register(s.seq)
         for (_, seq), token in zip(to_sample, self._sample_all(logits, [s for _, s in to_sample]), strict=True):
             outputs.append(self._process_token(seq, token))
         return outputs
+
+    # ---- speculative decoding ------------------------------------------------------------------
+    def _draft_catch_up(self, seqs: list[Sequence]) -> None:
+        """Run the draft over every token the target just computed that the draft hasn't seen, so both
+        caches hold the same positions. No logits are needed."""
+        ids: list[int] = []
+        positions: list[int] = []
+        live: list[Sequence] = []
+        for seq in seqs:
+            if seq.draft_computed < seq.num_computed:
+                ids += seq.tokens[seq.draft_computed:seq.num_computed]
+                positions += range(seq.draft_computed, seq.num_computed)
+                live.append(seq)
+        if not live:
+            return
+        meta = build_metadata(self.bm, [s.seq_id for s in live], [s.num_computed - s.draft_computed for s in live],
+                              self.device, seq_lens=[s.num_computed for s in live])
+        assert self.draft is not None and self.draft_cache is not None
+        self.draft(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
+                   PagedContext(self.draft_cache, meta), logits_indices=torch.empty(0, dtype=torch.long,
+                                                                                    device=self.device))
+        for seq in live:
+            seq.draft_computed = seq.num_computed
+
+    def _speculative_step(self, seqs: list[Sequence]) -> list[RequestOutput]:
+        """Every sequence is decoding: the scheduler reserved one slot for its last token (position L-1).
+        Reserve k more, draft k tokens, score [last, d1..dk] with the target in one pass, keep what verifies."""
+        assert self.draft is not None and self.draft_cache is not None
+        ks: list[int] = []
+        for seq in seqs:
+            remaining = seq.params.max_tokens - len(seq.output_ids)  # >= 1, or it would have finished
+            k = min(self.k, remaining - 1)  # all k accepted + the bonus token must fit in max_tokens
+            if k > 0 and self.bm.can_append(seq.seq_id, k):
+                self._copy_blocks(self.bm.append_slots(seq.seq_id, k))
+            else:
+                k = 0
+            ks.append(k)
+
+        # Draft: k passes. Pass 0 also feeds any tokens the draft hasn't seen yet (it can trail by one).
+        drafts: list[list[int]] = [[] for _ in seqs]
+        draft_probs: list[list[torch.Tensor]] = [[] for _ in seqs]
+        for i in range(max(ks)):
+            active = [b for b, k in enumerate(ks) if k > i]
+            ids: list[int] = []
+            positions: list[int] = []
+            qlens: list[int] = []
+            for b in active:
+                seq, L = seqs[b], seqs[b].num_tokens
+                if i == 0:
+                    new = seq.tokens[seq.draft_computed:L]
+                    positions += range(seq.draft_computed, L)
+                else:
+                    new = [drafts[b][-1]]
+                    positions.append(L - 1 + i)
+                ids += new
+                qlens.append(len(new))
+            visible = [seqs[b].num_tokens + i for b in active]
+            meta = build_metadata(self.bm, [seqs[b].seq_id for b in active], qlens, self.device, seq_lens=visible)
+            rows = torch.tensor(list(itertools.accumulate(qlens)), device=self.device) - 1
+            logits = self.draft(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
+                                PagedContext(self.draft_cache, meta), logits_indices=rows)
+            self._propose(logits, [seqs[b] for b in active], [drafts[b] for b in active],
+                          [draft_probs[b] for b in active])
+        for seq, k in zip(seqs, ks, strict=True):
+            if k:
+                seq.draft_computed = seq.num_tokens - 1 + k  # it saw last, d1 .. d(k-1)
+
+        # Target: one pass over [last, d1..dk] for every sequence.
+        ids, positions = [], []
+        for seq, d in zip(seqs, drafts, strict=True):
+            L = seq.num_tokens
+            ids += [seq.tokens[-1], *d]
+            positions += range(L - 1, L + len(d))
+        meta = build_metadata(self.bm, [s.seq_id for s in seqs], [k + 1 for k in ks], self.device)
+        logits = self.model(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
+                            PagedContext(self.cache, meta))
+
+        outputs: list[RequestOutput] = []
+        offsets = [0, *itertools.accumulate(k + 1 for k in ks)]
+        greedy_rows = logits.argmax(dim=-1).tolist() if any(s.params.temperature == 0 for s in seqs) else []
+        for b, (seq, k) in enumerate(zip(seqs, ks, strict=True)):
+            lo, hi = offsets[b], offsets[b + 1]
+            try:
+                if seq.params.temperature == 0:
+                    target = greedy_rows[lo:hi]
+                    j = next((i for i in range(k) if drafts[b][i] != target[i]), k)
+                    token: int | None = target[j]
+                else:
+                    p = torch.stack([probs(r, seq.params) for r in logits[lo:hi].cpu()])
+                    q = torch.stack(draft_probs[b]) if k else None
+                    j, token = verify(drafts[b], q, p, greedy=False, generator=seq.generator)
+            except Exception:  # one bad request must not take the whole batch down
+                j, token = 0, None
+            self.spec_proposed += k
+            self.spec_accepted += j
+            L = seq.num_tokens
+            self.bm.rollback(seq.seq_id, k - j)  # forget the rejected draft positions in both caches
+            seq.num_computed = L + j
+            seq.draft_computed = min(seq.draft_computed, seq.num_computed)
+            out = RequestOutput(seq.request_id)
+            for t in [*drafts[b][:j], token]:
+                self._process_token(seq, t, out)
+                if out.finished:
+                    break
+            if not out.finished:
+                self._register(seq)
+            outputs.append(out)
+        return outputs
+
+    def _propose(self, logits: torch.Tensor, seqs: list[Sequence], drafts: list[list[int]],
+                 draft_probs: list[list[torch.Tensor]]) -> None:
+        """Draw one draft token per sequence. Sampling requests keep the draft distribution q for verify."""
+        greedy = [s.params.temperature == 0 for s in seqs]
+        argmax = logits.argmax(dim=-1).tolist() if any(greedy) else []
+        rows = logits.cpu() if not all(greedy) else None
+        for i, seq in enumerate(seqs):
+            if greedy[i]:
+                drafts[i].append(argmax[i])
+                continue
+            assert rows is not None
+            q = probs(rows[i], seq.params)
+            drafts[i].append(int(torch.multinomial(q, 1, generator=seq.generator)))
+            draft_probs[i].append(q)
+
+    def _register(self, seq: Sequence) -> None:
+        """Add newly completed full blocks to the prefix cache, once both caches hold their K/V."""
+        done = seq.num_computed if self.draft is None else min(seq.num_computed, seq.draft_computed)
+        if seq.seq_id in self.bm.seq_ids and self.bm.needs_register(seq.seq_id, done):
+            self.bm.register_computed(seq.seq_id, seq.tokens, done)
+
+    def _copy_blocks(self, copies: list[tuple[int, int]]) -> None:
+        if copies:
+            self.cache.copy_blocks(copies)
+            if self.draft_cache is not None:
+                self.draft_cache.copy_blocks(copies)
 
     # ---- internals -----------------------------------------------------------------------------
     def _sample_all(self, logits: torch.Tensor, seqs: list[Sequence]) -> list[int | None]:
@@ -157,8 +321,9 @@ class LLMEngine:
                     tokens[i] = None
         return tokens
 
-    def _process_token(self, seq: Sequence, token: int | None) -> RequestOutput:
-        out = RequestOutput(seq.request_id)
+    def _process_token(self, seq: Sequence, token: int | None, out: RequestOutput | None = None) -> RequestOutput:
+        """Append one token to the sequence and to `out` (a new output if None); finish if it stops."""
+        out = out if out is not None else RequestOutput(seq.request_id)
         if token is None:
             return self._finish(seq, out, "error")
         params = seq.params
@@ -169,9 +334,10 @@ class LLMEngine:
             return self._finish(seq, out, "stop")
 
         seq.output_ids.append(token)
-        out.new_token_ids = [token]
+        out.new_token_ids.append(token)
         if seq.streamer is not None:
-            out.new_text, hit = seq.streamer.push(token)
+            text, hit = seq.streamer.push(token)
+            out.new_text += text
             if hit:
                 return self._finish(seq, out, "stop")
         if len(seq.output_ids) >= params.max_tokens:

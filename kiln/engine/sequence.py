@@ -26,6 +26,7 @@ class Sequence:
         self.streamer = streamer
         self.output_ids: list[int] = []
         self.num_computed = 0  # tokens whose K/V are in the cache
+        self.draft_computed = 0  # tokens whose K/V are in the draft model's cache (speculative decoding)
         self.status = SeqStatus.WAITING
         self.finish_reason: str | None = None
         self.num_preemptions = 0

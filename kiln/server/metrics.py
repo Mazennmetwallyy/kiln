@@ -26,6 +26,8 @@ class Metrics:
                                   registry=r)
         self.prefix_hit = Gauge("kiln_prefix_cache_hit_tokens", "Prompt tokens served from the prefix cache",
                                 registry=r)
+        self.spec_proposed = Gauge("kiln_spec_proposed_tokens", "Draft tokens proposed", registry=r)
+        self.spec_accepted = Gauge("kiln_spec_accepted_tokens", "Draft tokens accepted by the target", registry=r)
         self.ttft = Histogram("kiln_time_to_first_token_seconds", "Time to first token", registry=r,
                               buckets=_LATENCY_BUCKETS)
         self.itl = Histogram("kiln_inter_token_latency_seconds", "Time between streamed outputs", registry=r,
@@ -44,3 +46,5 @@ class Metrics:
         self.blocks_cached.set(stats.num_cached_blocks)
         self.prefix_query.set(stats.prefix_cache_query_tokens)
         self.prefix_hit.set(stats.prefix_cache_hit_tokens)
+        self.spec_proposed.set(stats.spec_proposed_tokens)
+        self.spec_accepted.set(stats.spec_accepted_tokens)

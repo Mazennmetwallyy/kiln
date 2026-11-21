@@ -92,7 +92,7 @@ class Scheduler:
             self.waiting.popleft()
             got = self.bm.allocate(seq.seq_id, cached + n, tokens)
             assert got == cached
-            seq.num_computed = cached
+            seq.num_computed = seq.draft_computed = cached
             self.prefix_query_tokens += len(tokens)
             self.prefix_hit_tokens += cached
             seq.status = SeqStatus.RUNNING
@@ -123,7 +123,7 @@ class Scheduler:
         """Preemption by recomputation: drop the K/V and redo the prefill (prompt + output) later."""
         self.running.remove(seq)
         self.bm.free(seq.seq_id)
-        seq.num_computed = 0
+        seq.num_computed = seq.draft_computed = 0
         seq.status = SeqStatus.WAITING
         seq.num_preemptions += 1
         self.num_preemptions += 1

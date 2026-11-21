@@ -28,10 +28,13 @@ class AttentionMetadata:
 
 
 def build_metadata(bm: BlockManager, seq_ids: list[int], query_lens: list[int],
-                   device: str | torch.device) -> AttentionMetadata:
-    """Call after the block manager has grown each sequence by its query_len."""
+                   device: str | torch.device, seq_lens: list[int] | None = None) -> AttentionMetadata:
+    """Call after the block manager has grown each sequence by its query_len.
+
+    seq_lens: how much of each sequence this forward pass sees, if not all of it. The draft model's
+    passes in speculative decoding see a growing prefix of slots that are already reserved."""
     bs = bm.block_size
-    seq_lens = [bm.seq_len(s) for s in seq_ids]
+    seq_lens = seq_lens if seq_lens is not None else [bm.seq_len(s) for s in seq_ids]
     new_slots: list[int] = []
     context: list[list[int]] = []
     for sid, q, n in zip(seq_ids, query_lens, seq_lens, strict=True):

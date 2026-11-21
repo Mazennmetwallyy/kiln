@@ -140,6 +140,41 @@ def test_fp32_prefix_caching_matches_no_caching(repo):
     gc.collect()
 
 
+@pytest.mark.slow
+def test_fp32_speculative_greedy_equals_target_alone():
+    """SmolLM2-135M drafts for SmolLM2-360M: speculative greedy output must equal the target's own."""
+    target_path = Path(snapshot_download("HuggingFaceTB/SmolLM2-360M-Instruct", allow_patterns=PATTERNS))
+    draft_path = Path(snapshot_download("HuggingFaceTB/SmolLM2-135M-Instruct", allow_patterns=PATTERNS))
+    tok = Tokenizer.from_hf_dir(target_path)
+    prompts = [_prompt_ids(tok, p) for p in PROMPTS]
+    target, config = load_model(target_path, dtype=torch.float32, device="cpu")
+    draft, dconfig = load_model(draft_path, dtype=torch.float32, device="cpu")
+    params = SamplingParams(temperature=0.0, max_tokens=48, ignore_eos=True)
+    plain = _run_engine(LLMEngine(target, config, None, num_blocks=256, block_size=16, max_batched_tokens=256),
+                        prompts, params, first_alone=False)
+    engine = LLMEngine(target, config, None, num_blocks=256, block_size=16, max_batched_tokens=256,
+                       draft_model=draft, draft_config=dconfig, num_speculative_tokens=4)
+    spec = _run_engine(engine, prompts, params, first_alone=False)
+    s = engine.stats()
+    print(f"\nacceptance {s.spec_accepted_tokens}/{s.spec_proposed_tokens} = "
+          f"{s.spec_accepted_tokens / s.spec_proposed_tokens:.2f}; target forwards {s.num_target_forwards}")
+    same = sum(a == b for a, b in zip(spec, plain, strict=True))
+    for i, (a, b) in enumerate(zip(spec, plain, strict=True)):
+        if a != b:  # allowed only at a near-tie of the target's logits (scored in a different batch shape)
+            j = next(t for t, (x, y) in enumerate(zip(a, b, strict=True)) if x != y)
+            with torch.no_grad():
+                ids = torch.tensor(prompts[i] + b[:j])
+                cache = ContiguousKVCache(config, len(ids), torch.float32, "cpu")
+                cache.set_positions(0, len(ids))
+                logits = target(ids, torch.arange(len(ids)), cache)[-1]
+            top2 = torch.topk(logits, 2).values
+            assert float(top2[0] - top2[1]) < NEAR_TIE, f"prompt {i} diverged at token {j}"
+    print(f"{same}/{len(prompts)} prompts identical")
+    assert same >= len(prompts) - 1
+    del target, draft
+    gc.collect()
+
+
 @pytest.mark.mps
 @pytest.mark.slow
 def test_qwen_fp16_mps_logits_close():
