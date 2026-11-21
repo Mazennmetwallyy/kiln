@@ -296,12 +296,12 @@ An assistant product sends the same system prompt in front of every user message
 K/V for a token depends on that token *and every token before it*. So a block can only be reused by a request whose entire prefix up to that block is identical, not just the block's own 16 tokens. Kiln gives every full, computed block a key:
 
 ```
-key(block i) = hash( key(block i-1), tokens of block i )      # key(block -1) = None
+key(block i) = sha256( key(block i-1) ‖ tokens of block i )      # key(block -1) = empty
 ```
 
 Chaining the parent's key in makes the key stand for the whole prefix. A new request computes the same keys for its prompt and follows the chain until the first miss. Matching blocks are shared (refcount + 1). The request's `num_computed` starts at the cached length, so the scheduler only sends the rest through the model.
 
-A hash can collide, so a hit is checked against the stored parent key and the stored tokens. A collision then becomes a miss and can never produce wrong K/V.
+A hit is also checked against the stored parent key and the stored tokens. The hash must be cryptographic. With Python's built-in 64-bit `hash()`, someone could craft a prompt whose first block collides with another prompt's first-block key, then register a second block whose "parent key" matches. Later requests would reuse that block's K/V, which was computed after a different first block. An automated security review flagged this, and SHA-256 makes it infeasible.
 
 ### Keeping freed blocks around
 When the last request using a cached block finishes, the block isn't wiped. It joins an LRU of *evictable* blocks: still holding valid K/V, still findable, but counted as free. Allocation takes truly free blocks first, then evicts the least recently used cached block, dropping its key. So the cache costs no memory that anything else needed, and a popular system prompt stays resident as long as there's room.
@@ -323,3 +323,5 @@ Prefill computed fell 83% (31,368 → 5,304 tokens) and mean time to first token
 - Why do cached blocks never need copy-on-write, but rolled-back ones need special handling?
 - Evictable blocks count as free. Why is that safe, and what happens when one is needed?
 - Block-level hashing vs a radix tree (SGLang): what does each give up?
+- Why must the block key be a cryptographic hash? What could an attacker do with a 64-bit one?
+- How can a prefix cache leak information between users, and what are the mitigations?

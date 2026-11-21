@@ -159,3 +159,28 @@ def test_rollback_keeps_a_shared_cached_block():
     assert bm.cached_prefix_len([1, 2, 3, 4, 9]) == 4
     assert bm.append_slots(1, 1) == [(bm.block_table(2)[0], bm.block_table(1)[0])]  # copy-on-write
     bm.check_invariants()
+
+
+def test_block_keys_are_sha256_of_the_whole_prefix():
+    # A non-cryptographic hash lets a crafted prompt collide with another's parent key and then inherit
+    # its children, serving K/V computed from a different context. Keys must be collision resistant.
+    import hashlib
+    from array import array
+
+    bm = BlockManager(8, 4, enable_prefix_caching=True)
+    toks = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    bm.allocate(1, 9, toks)
+    bm.register_computed(1, toks, 9)
+    k0 = hashlib.sha256(b"" + array("q", [1, 2, 3, 4]).tobytes()).digest()
+    k1 = hashlib.sha256(k0 + array("q", [5, 6, 7, 8]).tobytes()).digest()
+    table = bm.block_table(1)
+    assert bm.block_key(table[0]) == k0 and bm.block_key(table[1]) == k1
+
+
+def test_same_block_tokens_under_different_parents_get_different_keys():
+    bm = BlockManager(8, 4, enable_prefix_caching=True)
+    a, b = [1, 1, 1, 1, 5, 6, 7, 8, 0], [2, 2, 2, 2, 5, 6, 7, 8, 0]
+    computed(bm, 1, a)
+    computed(bm, 2, b)
+    assert bm.block_key(bm.block_table(1)[1]) != bm.block_key(bm.block_table(2)[1])
+    assert bm.cached_prefix_len([2, 2, 2, 2, 5, 6, 7, 8, 3]) == 8

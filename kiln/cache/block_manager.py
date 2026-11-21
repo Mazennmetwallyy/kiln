@@ -7,14 +7,18 @@ filled block triggers copy-on-write. The manager only does bookkeeping. It never
 Callers apply the copy pairs it returns.
 
 Prefix caching (optional): once a *full* block's K/V has been computed it gets a content key. The key is
-a hash of (parent block's key, the block's 16 token ids), so it identifies the whole prefix up to that
-block. A new request walks its prompt block by block and reuses every block already cached. A block
+SHA-256 of (parent block's key, the block's 16 token ids), so it identifies the whole prefix up to that
+block. A cryptographic hash matters here: with a weak one, a crafted prompt could collide with another
+prompt's parent key and inherit its child blocks, whose K/V was computed from a different context.
+A new request walks its prompt block by block and reuses every block already cached. A block
 whose last user finishes isn't wiped. It becomes *evictable*: still cached, still available, and
 reclaimed least-recently-used first when fresh blocks run out.
 """
 
 from __future__ import annotations
 
+import hashlib
+from array import array
 from collections import OrderedDict
 from collections.abc import Sequence
 
@@ -25,6 +29,10 @@ class NoFreeBlocksError(RuntimeError):
 
 def _ceil_div(a: int, b: int) -> int:
     return -(-a // b)
+
+
+def _block_key(parent: bytes | None, tokens: tuple[int, ...]) -> bytes:
+    return hashlib.sha256((parent or b"") + array("q", tokens).tobytes()).digest()
 
 
 class BlockManager:
@@ -40,11 +48,11 @@ class BlockManager:
         self._tables: dict[int, list[int]] = {}
         self._lens: dict[int, int] = {}
         # prefix cache
-        self._key_of: dict[int, int] = {}  # block -> content key
-        self._block_of: dict[int, int] = {}  # content key -> block
-        self._parent_key_of: dict[int, int | None] = {}
+        self._key_of: dict[int, bytes] = {}  # block -> content key
+        self._block_of: dict[bytes, int] = {}  # content key -> block
+        self._parent_key_of: dict[int, bytes | None] = {}
         self._tokens_of: dict[int, tuple[int, ...]] = {}
-        self._seq_keys: dict[int, list[int]] = {}  # keys of each sequence's leading registered blocks
+        self._seq_keys: dict[int, list[bytes]] = {}  # keys of each sequence's leading registered blocks
 
     # ---- queries -------------------------------------------------------------------------------
     @property
@@ -72,6 +80,9 @@ class BlockManager:
     def block_tokens(self, block_id: int) -> tuple[int, ...] | None:
         """The token ids a cached block holds (None if the block isn't in the prefix cache)."""
         return self._tokens_of.get(block_id)
+
+    def block_key(self, block_id: int) -> bytes | None:
+        return self._key_of.get(block_id)
 
     def is_evictable(self, block_id: int) -> bool:
         return block_id in self._evictable
@@ -126,7 +137,7 @@ class BlockManager:
         for i in range(len(keys), num_computed // bs):
             block, tokens = table[i], tuple(token_ids[i * bs:(i + 1) * bs])
             parent = keys[i - 1] if i else None
-            key = hash((parent, tokens))
+            key = _block_key(parent, tokens)
             keys.append(key)
             if block in self._key_of or key in self._block_of:
                 continue  # already cached, or an identical block exists (e.g. computed concurrently)
@@ -212,10 +223,10 @@ class BlockManager:
         if num_tokens is not None:
             limit = min(limit, num_tokens // bs)
         blocks: list[int] = []
-        parent: int | None = None
+        parent: bytes | None = None
         for i in range(limit):
             tokens = tuple(token_ids[i * bs:(i + 1) * bs])
-            key = hash((parent, tokens))
+            key = _block_key(parent, tokens)
             b = self._block_of.get(key)
             # Verify rather than trust the hash: same parent and same tokens means the same prefix.
             if b is None or self._parent_key_of[b] != parent or self._tokens_of[b] != tokens:
