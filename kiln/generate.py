@@ -97,6 +97,7 @@ def _token_stream(model: nn.Module, config: ModelConfig, prompt_ids: list[int], 
 
     ids = torch.tensor(prompt_ids, device=device)
     positions = torch.arange(len(prompt_ids), device=device)
+    cache.set_positions(0, len(prompt_ids))
     for n in range(1, params.max_tokens + 1):
         token = sample(model(ids, positions, cache)[-1], params, generator)
         if token in stop_ids:
@@ -104,6 +105,7 @@ def _token_stream(model: nn.Module, config: ModelConfig, prompt_ids: list[int], 
         yield token
         ids = torch.tensor([token], device=device)
         positions = torch.tensor([len(prompt_ids) + n - 1], device=device)
+        cache.set_positions(len(prompt_ids) + n - 1, 1)
     return "length"
 
 

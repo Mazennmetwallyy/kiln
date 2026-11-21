@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from torch import Tensor, nn
 
+from kiln.attention.base import AttentionContext
 from kiln.model.attention import Attention
 from kiln.model.config import ModelConfig
-from kiln.model.kv_cache import ContiguousKVCache
 from kiln.model.layers import RMSNorm, RotaryEmbedding, SwiGLU
 
 
@@ -18,10 +18,10 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = SwiGLU(config.hidden_size, config.intermediate_size)
 
-    def forward(self, x: Tensor, positions: Tensor, cache: ContiguousKVCache, layer_idx: int,
+    def forward(self, x: Tensor, positions: Tensor, ctx: AttentionContext, layer_idx: int,
                 rope: RotaryEmbedding) -> Tensor:
         # Pre-norm residual blocks: x + attn(norm(x)), then x + mlp(norm(x)).
-        x = x + self.self_attn(self.input_layernorm(x), positions, cache, layer_idx, rope)
+        x = x + self.self_attn(self.input_layernorm(x), positions, ctx, layer_idx, rope)
         return x + self.mlp(self.post_attention_layernorm(x))
 
 
@@ -43,9 +43,9 @@ class Transformer(nn.Module):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-    def forward(self, input_ids: Tensor, positions: Tensor, cache: ContiguousKVCache) -> Tensor:
+    def forward(self, input_ids: Tensor, positions: Tensor, ctx: AttentionContext) -> Tensor:
         """input_ids, positions: [T] (flat, no batch dim). Returns fp32 logits [T, vocab]."""
         x = self.model.embed_tokens(input_ids)
         for i, layer in enumerate(self.model.layers):
-            x = layer(x, positions, cache, i, self.rotary)
+            x = layer(x, positions, ctx, i, self.rotary)
         return self.lm_head(self.model.norm(x)).float()

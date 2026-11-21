@@ -8,6 +8,7 @@ from tests.model.tiny import make_tiny_hf_model
 
 def full_forward(model, config, ids):
     cache = ContiguousKVCache(config, max_tokens=len(ids), dtype=torch.float32, device="cpu")
+    cache.set_positions(0, len(ids))
     return model(ids, torch.arange(len(ids)), cache)
 
 
@@ -30,8 +31,10 @@ def test_incremental_matches_full(arch, tmp_path):
     with torch.no_grad():
         full = full_forward(model, config, ids)
         cache = ContiguousKVCache(config, max_tokens=20, dtype=torch.float32, device="cpu")
+        cache.set_positions(0, 12)
         rows = [model(ids[:12], torch.arange(12), cache)]
         for t in range(12, 20):
+            cache.set_positions(t, 1)
             rows.append(model(ids[t : t + 1], torch.tensor([t]), cache))
     torch.testing.assert_close(torch.cat(rows), full, atol=1e-5, rtol=0)
 

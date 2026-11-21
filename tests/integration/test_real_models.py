@@ -75,18 +75,20 @@ def test_qwen_fp16_mps_logits_close():
     prompts = [_prompt_ids(tok, p) for p in PROMPTS]
 
     ref_model, config = load_model(path, dtype=torch.float32, device="cpu")
-    with torch.no_grad():
-        refs = [ref_model(torch.tensor(ids), torch.arange(len(ids)),
-                          ContiguousKVCache(config, len(ids), torch.float32, "cpu"))[-1] for ids in prompts]
+    def full(model, ids, dtype, device):
+        cache = ContiguousKVCache(config, len(ids), dtype, device)
+        cache.set_positions(0, len(ids))
+        with torch.no_grad():
+            return model(torch.tensor(ids, device=device), torch.arange(len(ids), device=device), cache)[-1]
+
+    refs = [full(ref_model, ids, torch.float32, "cpu") for ids in prompts]
     del ref_model
     gc.collect()
 
     model, config = load_model(path, dtype=torch.float16, device="mps")
     worst = 0.0
     for ids, ref in zip(prompts, refs, strict=True):
-        with torch.no_grad():
-            out = model(torch.tensor(ids, device="mps"), torch.arange(len(ids), device="mps"),
-                        ContiguousKVCache(config, len(ids), torch.float16, "mps"))[-1].cpu()
+        out = full(model, ids, torch.float16, "mps").cpu()
         worst = max(worst, float((out - ref).abs().max()))
         assert int(out.argmax()) == int(ref.argmax())
     print(f"\nMPS fp16 vs CPU fp32: worst max-abs logit diff {worst:.4f}; "
