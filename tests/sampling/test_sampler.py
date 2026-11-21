@@ -45,7 +45,7 @@ def test_temperature_sharpens():
 
 
 @pytest.mark.parametrize("kw", [{"temperature": -0.1}, {"top_p": 0.0}, {"top_p": 1.5}, {"top_k": -1},
-                                {"max_tokens": -1}])
+                                {"max_tokens": -1}, {"stop": [""]}])
 def test_invalid_params_raise(kw):
     with pytest.raises(ValueError):
         SamplingParams(**kw)

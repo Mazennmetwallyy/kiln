@@ -1,10 +1,14 @@
+from pathlib import Path
+
 import pytest
 import torch
 from torch import nn
 
-from kiln.generate import generate
+from kiln.generate import generate, stream_generate
+from kiln.model.config import ModelConfig
 from kiln.model.loader import load_model
 from kiln.sampling import SamplingParams
+from kiln.tokenizer import Tokenizer
 from tests.model.tiny import make_tiny_hf_model
 
 PROMPT = [5, 17, 42, 99, 3, 250, 7]
@@ -92,3 +96,63 @@ def test_empty_prompt_raises(tmp_path):
     model, config = load_model(path)
     with pytest.raises(ValueError):
         generate(model, config, [], SamplingParams())
+
+
+# ---- stop strings and streaming (need a real tokenizer) ----
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "smollm2"
+
+
+class _Scripted(nn.Module):
+    """A fake model that emits a fixed token sequence, one per forward call."""
+
+    def __init__(self, script, vocab):
+        super().__init__()
+        self.script, self.vocab, self.calls = script, vocab, 0
+        self.dummy = nn.Parameter(torch.zeros(1))
+
+    def forward(self, ids, positions, cache):
+        logits = torch.zeros(len(ids), self.vocab)
+        logits[-1, self.script[min(self.calls, len(self.script) - 1)]] = 1.0
+        self.calls += 1
+        return logits
+
+
+def _fake_config(vocab):
+    return ModelConfig(arch="llama", vocab_size=vocab, hidden_size=4, intermediate_size=4, num_layers=1,
+                       num_heads=1, num_kv_heads=1, head_dim=4, rope_theta=1e4, rms_norm_eps=1e-6,
+                       max_position_embeddings=512, tie_word_embeddings=True, attention_bias=False,
+                       eos_token_ids=(2,))
+
+
+def test_stop_string_across_tokens():
+    tok = Tokenizer.from_hf_dir(FIXTURE)
+    script = tok.encode("Hello world, how are you", add_special_tokens=False)
+    # Pick a stop string that starts inside one token and ends inside the next.
+    assert tok.decode(script[:1]) == "Hello" and tok.decode(script[1:2]) == " world"
+    params = SamplingParams(temperature=0.0, max_tokens=20, stop=["o w"])
+    model = _Scripted(script, 49152)
+    out = generate(model, _fake_config(49152), [1], params, tokenizer=tok)
+    assert out.text == "Hell"
+    assert out.finish_reason == "stop"
+
+
+def test_stream_deltas_hold_back_partial_stop():
+    tok = Tokenizer.from_hf_dir(FIXTURE)
+    script = tok.encode("Hello world, how are you", add_special_tokens=False)
+    params = SamplingParams(temperature=0.0, max_tokens=20, stop=["o w"])
+    deltas = list(stream_generate(_Scripted(script, 49152), _fake_config(49152), [1], params, tokenizer=tok))
+    assert "".join(deltas) == "Hell"
+    assert all("o w" not in d for d in deltas)
+
+
+def test_stream_matches_generate_without_stop():
+    tok = Tokenizer.from_hf_dir(FIXTURE)
+    script = [*tok.encode("Héllo 👋🏽 world", add_special_tokens=False), 2]
+    params = SamplingParams(temperature=0.0, max_tokens=40)
+    cfg = _fake_config(49152)
+    full = generate(_Scripted(script, 49152), cfg, [1], params, tokenizer=tok)
+    deltas = list(stream_generate(_Scripted(script, 49152), cfg, [1], params, tokenizer=tok))
+    assert "".join(deltas) == full.text == "Héllo 👋🏽 world"
+    assert full.finish_reason == "stop"

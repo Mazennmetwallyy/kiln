@@ -1,0 +1,1 @@
+Tokenizer files from HuggingFaceTB/SmolLM2-135M-Instruct (Apache-2.0), used as a test fixture.

@@ -23,3 +23,5 @@ class SamplingParams:
             raise ValueError(f"top_k must be >= 0, got {self.top_k}")
         if self.max_tokens < 0:
             raise ValueError(f"max_tokens must be >= 0, got {self.max_tokens}")
+        if any(s == "" for s in self.stop):
+            raise ValueError("stop strings must be non-empty")

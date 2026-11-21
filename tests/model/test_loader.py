@@ -26,5 +26,5 @@ def test_missing_weight_reported(tmp_path):
 def test_unexpected_weight_reported(tmp_path):
     path, _ = make_tiny_hf_model("llama", tmp_path)
     _rewrite(path, lambda t: t.__setitem__("model.layers.0.foo", torch.zeros(3)))
-    with pytest.raises(WeightLoadError, match="model.layers.0.foo"):
+    with pytest.raises(WeightLoadError, match=r"model\.layers\.0\.foo"):
         load_model(path)

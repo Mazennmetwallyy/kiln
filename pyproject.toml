@@ -24,5 +24,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 110
 
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "SIM", "C4", "UP", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # unicode in docs/tests is intentional
+
 [tool.mypy]
 ignore_missing_imports = true

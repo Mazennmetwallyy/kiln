@@ -49,5 +49,6 @@ def load_model(path: Path | str, dtype: torch.dtype = torch.float32,
     model.load_state_dict(state, strict=False, assign=True)
     if config.tie_word_embeddings:
         model.lm_head.weight = model.model.embed_tokens.weight
-    model.rotary = RotaryEmbedding(config.head_dim, config.rope_theta, config.max_position_embeddings).to(device)
+    rope = RotaryEmbedding(config.head_dim, config.rope_theta, config.max_position_embeddings)
+    model.rotary = rope.to(device)
     return model.eval(), config
