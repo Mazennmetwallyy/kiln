@@ -146,3 +146,38 @@ def test_draft_must_share_the_vocab(models, tmp_path):
     with pytest.raises(ValueError, match="vocab"):
         LLMEngine(target, config, None, num_blocks=8, draft_model=draft, draft_config=dconfig,
                   num_speculative_tokens=2)
+
+
+def test_a_failing_draft_proposal_only_fails_that_request(models, monkeypatch):
+    import kiln.engine.engine as engine_mod
+
+    real = engine_mod.probs
+
+    def flaky(logits, params):
+        if params.top_k == 7:  # marks the request whose sampling blows up (e.g. NaN logits)
+            raise RuntimeError("probability tensor contains inf or nan")
+        return real(logits, params)
+
+    monkeypatch.setattr(engine_mod, "probs", flaky)
+    engine = spec_engine(models, "near", 3)
+    engine.add_request("bad", PROMPTS["r3"], SamplingParams(temperature=1.0, top_k=7, max_tokens=10, ignore_eos=True))
+    engine.add_request("ok", PROMPTS["r5"], SamplingParams(temperature=1.0, top_k=8, seed=1, max_tokens=10,
+                                                           ignore_eos=True))
+    finish, counts = {}, {"bad": 0, "ok": 0}
+    while engine.has_unfinished():
+        for out in engine.step():
+            counts[out.request_id] += len(out.new_token_ids)
+            if out.finished:
+                finish[out.request_id] = out.finish_reason
+    assert finish == {"bad": "error", "ok": "length"} and counts["ok"] == 10
+    assert engine.stats().num_free_blocks == 64
+
+
+def test_context_limit_includes_the_draft_model(models, tmp_path):
+    path, _ = make_tiny_hf_model("qwen2", tmp_path, max_position_embeddings=32)
+    draft, dconfig = load_model(path)
+    target, config = models["target"]  # 128 positions
+    engine = LLMEngine(target, config, None, num_blocks=64, block_size=4, draft_model=draft, draft_config=dconfig,
+                       num_speculative_tokens=2)
+    with pytest.raises(ValueError, match="context"):
+        engine.add_request("long", list(range(3, 30)), SamplingParams(max_tokens=10))

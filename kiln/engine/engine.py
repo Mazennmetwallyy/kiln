@@ -86,6 +86,9 @@ class LLMEngine:
         self.max_context = config.max_position_embeddings
         if max_context is not None:
             self.max_context = min(self.max_context, max_context)
+        if draft_config is not None and draft_model is not None:
+            # The draft sees every position the target does, so its context window limits requests too.
+            self.max_context = min(self.max_context, draft_config.max_position_embeddings)
         self._ids = itertools.count()
         self._live: dict[str, Sequence] = {}  # request_id -> sequence, until finished
         self._finished_now: list[RequestOutput] = []
@@ -202,6 +205,7 @@ class LLMEngine:
             else:
                 k = 0
             ks.append(k)
+        failed: set[int] = set()
 
         # Draft: k passes. Pass 0 also feeds any tokens the draft hasn't seen yet (it can trail by one).
         drafts: list[list[int]] = [[] for _ in seqs]
@@ -226,8 +230,13 @@ class LLMEngine:
             rows = torch.tensor(list(itertools.accumulate(qlens)), device=self.device) - 1
             logits = self.draft(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
                                 PagedContext(self.draft_cache, meta), logits_indices=rows)
-            self._propose(logits, [seqs[b] for b in active], [drafts[b] for b in active],
-                          [draft_probs[b] for b in active])
+            results = self._propose(logits, [seqs[b] for b in active], [drafts[b] for b in active],
+                                    [draft_probs[b] for b in active])
+            for b, ok in zip(active, results, strict=True):
+                if not ok:  # stop drafting for it and give back the unused slots; it finishes with "error"
+                    failed.add(b)
+                    self.bm.rollback(seqs[b].seq_id, ks[b] - len(drafts[b]))
+                    ks[b] = len(drafts[b])
         for seq, k in zip(seqs, ks, strict=True):
             if k:
                 seq.draft_computed = seq.num_tokens - 1 + k  # it saw last, d1 .. d(k-1)
@@ -248,6 +257,8 @@ class LLMEngine:
         for b, (seq, k) in enumerate(zip(seqs, ks, strict=True)):
             lo, hi = offsets[b], offsets[b + 1]
             try:
+                if b in failed:
+                    raise RuntimeError("draft proposal failed")
                 if seq.params.temperature == 0:
                     target = greedy_rows[lo:hi]
                     j = next((i for i in range(k) if drafts[b][i] != target[i]), k)
@@ -275,19 +286,27 @@ class LLMEngine:
         return outputs
 
     def _propose(self, logits: torch.Tensor, seqs: list[Sequence], drafts: list[list[int]],
-                 draft_probs: list[list[torch.Tensor]]) -> None:
-        """Draw one draft token per sequence. Sampling requests keep the draft distribution q for verify."""
+                 draft_probs: list[list[torch.Tensor]]) -> list[bool]:
+        """Draw one draft token per sequence. Sampling requests keep the draft distribution q for verify.
+        Returns, per sequence, whether it worked: one bad request must not take the whole batch down."""
         greedy = [s.params.temperature == 0 for s in seqs]
         argmax = logits.argmax(dim=-1).tolist() if any(greedy) else []
         rows = logits.cpu() if not all(greedy) else None
+        ok = [True] * len(seqs)
         for i, seq in enumerate(seqs):
             if greedy[i]:
                 drafts[i].append(argmax[i])
                 continue
             assert rows is not None
-            q = probs(rows[i], seq.params)
-            drafts[i].append(int(torch.multinomial(q, 1, generator=seq.generator)))
+            try:
+                q = probs(rows[i], seq.params)
+                token = int(torch.multinomial(q, 1, generator=seq.generator))
+            except Exception:
+                ok[i] = False
+                continue
+            drafts[i].append(token)
             draft_probs[i].append(q)
+        return ok
 
     def _register(self, seq: Sequence) -> None:
         """Add newly completed full blocks to the prefix cache, once both caches hold their K/V."""
