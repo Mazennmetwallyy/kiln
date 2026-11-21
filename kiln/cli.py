@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from kiln.generate import GenerationResult, _run
+from kiln.generate import generate_stream
 from kiln.model.loader import load_model
 from kiln.sampling import SamplingParams
 from kiln.tokenizer import Tokenizer
@@ -52,15 +52,21 @@ def main(argv: list[str] | None = None) -> int:
     params = SamplingParams(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
                             seed=args.seed, max_tokens=args.max_tokens)
 
-    result = GenerationResult()
+    try:
+        stream = generate_stream(model, config, prompt_ids, params, tok)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    n, finish = 0, None
     start = time.perf_counter()
-    for delta in _run(model, config, prompt_ids, params, tok, None, result):
-        sys.stdout.write(delta)
+    for out in stream:
+        sys.stdout.write(out.new_text)
         sys.stdout.flush()
+        n += len(out.new_token_ids)
+        finish = out.finish_reason or finish
     elapsed = time.perf_counter() - start
-    n = len(result.token_ids)
-    print(f"\n[{n} tokens in {elapsed:.2f}s, {n / elapsed:.1f} tokens/s, finish={result.finish_reason}]",
-          file=sys.stderr)
+    print(f"\n[{n} tokens in {elapsed:.2f}s ({n / elapsed:.1f} tokens/s end to end, incl. prefill), "
+          f"finish={finish}]", file=sys.stderr)
     return 0
 
 

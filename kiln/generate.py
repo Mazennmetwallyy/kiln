@@ -1,23 +1,17 @@
-"""Single-sequence generation: prefill the prompt once, then decode one token per step."""
+"""One-request convenience API on top of the engine."""
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Literal
 
-import torch
 from torch import nn
 
-from kiln.attention.metadata import build_metadata
-from kiln.attention.torch_paged import PagedContext
-from kiln.cache import BlockManager
-from kiln.cache.paged import PagedKVCache
+from kiln.engine.engine import LLMEngine, RequestOutput
 from kiln.model.config import ModelConfig
-from kiln.sampling import SamplingParams, sample
-from kiln.tokenizer import IncrementalDetokenizer, Tokenizer
+from kiln.sampling import SamplingParams
+from kiln.tokenizer import Tokenizer
 
-FinishReason = Literal["stop", "length"]
 BLOCK_SIZE = 16
 
 
@@ -25,111 +19,38 @@ BLOCK_SIZE = 16
 class GenerationResult:
     token_ids: list[int] = field(default_factory=list)
     text: str = ""
-    finish_reason: FinishReason = "length"
+    finish_reason: str = "length"
+
+
+def generate_stream(model: nn.Module, config: ModelConfig, prompt_ids: list[int], params: SamplingParams,
+                    tokenizer: Tokenizer | None = None, max_context: int | None = None) -> Iterator[RequestOutput]:
+    """Yield the engine's per-step outputs for a single request. Validation errors raise immediately."""
+    num_blocks = max(1, -(-(len(prompt_ids) + params.max_tokens) // BLOCK_SIZE))
+    engine = LLMEngine(model, config, tokenizer, num_blocks=num_blocks, block_size=BLOCK_SIZE,
+                       max_batched_tokens=max(512, len(prompt_ids)), max_context=max_context)
+    engine.add_request("0", prompt_ids, params)
+    return _drain(engine)
+
+
+def _drain(engine: LLMEngine) -> Iterator[RequestOutput]:
+    while engine.has_unfinished():
+        yield from engine.step()
 
 
 def generate(model: nn.Module, config: ModelConfig, prompt_ids: list[int], params: SamplingParams,
              tokenizer: Tokenizer | None = None, max_context: int | None = None) -> GenerationResult:
     result = GenerationResult()
-    for _ in _run(model, config, prompt_ids, params, tokenizer, max_context, result):
-        pass
+    for out in generate_stream(model, config, prompt_ids, params, tokenizer, max_context):
+        result.token_ids += out.new_token_ids
+        result.text += out.new_text
+        if out.finished and out.finish_reason is not None:
+            result.finish_reason = out.finish_reason
     return result
 
 
 def stream_generate(model: nn.Module, config: ModelConfig, prompt_ids: list[int], params: SamplingParams,
                     tokenizer: Tokenizer | None = None, max_context: int | None = None) -> Iterator[str]:
     """Yield text deltas as they become final. Joined, they equal `generate(...).text`."""
-    yield from _run(model, config, prompt_ids, params, tokenizer, max_context, GenerationResult())
-
-
-def _run(model: nn.Module, config: ModelConfig, prompt_ids: list[int], params: SamplingParams,
-         tokenizer: Tokenizer | None, max_context: int | None, result: GenerationResult) -> Iterator[str]:
-    if params.stop and tokenizer is None:
-        raise ValueError("stop strings need a tokenizer")
-    tokens = _token_stream(model, config, prompt_ids, params, max_context)
-    detok = IncrementalDetokenizer(tokenizer) if tokenizer is not None else None
-    pending = ""  # decoded text not yet emitted, held back in case it starts a stop string
-    try:
-        while True:
-            token = next(tokens)
-            result.token_ids.append(token)
-            if detok is None:
-                continue
-            pending += detok.push(token)
-            hit = _find_stop(pending, params.stop)
-            if hit is not None:
-                result.text += pending[:hit]
-                result.finish_reason = "stop"
-                if hit:
-                    yield pending[:hit]
-                return
-            keep = _partial_stop_suffix(pending, params.stop)
-            ready, pending = pending[: len(pending) - keep], pending[len(pending) - keep:]
-            if ready:
-                result.text += ready
-                yield ready
-    except StopIteration as done:
-        result.finish_reason = done.value
-        if pending:  # generation ended; a partial stop string never completed, so it's real text
-            result.text += pending
-            yield pending
-
-
-@torch.no_grad()
-def _token_stream(model: nn.Module, config: ModelConfig, prompt_ids: list[int], params: SamplingParams,
-                  max_context: int | None) -> Generator[int, None, FinishReason]:
-    """Yield generated token ids (stop/EOS ids excluded); return the finish reason."""
-    if not prompt_ids:
-        raise ValueError("prompt must contain at least one token")
-    limit = config.max_position_embeddings
-    if max_context is not None:
-        limit = min(limit, max_context)  # a deployment may lower the limit, never raise it past RoPE's table
-    total = len(prompt_ids) + params.max_tokens
-    if total > limit:
-        raise ValueError(f"prompt ({len(prompt_ids)}) + max_tokens ({params.max_tokens}) = {total} "
-                         f"exceeds the context limit of {limit}")
-    if params.max_tokens == 0:
-        return "length"
-
-    weight = next(model.parameters())
-    device = weight.device
-    num_blocks = -(-total // BLOCK_SIZE)
-    bm = BlockManager(num_blocks, BLOCK_SIZE)
-    cache = PagedKVCache(config, num_blocks, BLOCK_SIZE, weight.dtype, device)
-    generator = torch.Generator().manual_seed(params.seed) if params.seed is not None else None
-    stop_ids = set(params.stop_token_ids)
-    if not params.ignore_eos:
-        stop_ids.update(config.eos_token_ids)
-
-    seq = 0
-    bm.allocate(seq, len(prompt_ids))
-    ids = torch.tensor(prompt_ids, device=device)
-    positions = torch.arange(len(prompt_ids), device=device)
-    query_len = len(prompt_ids)
-    for n in range(1, params.max_tokens + 1):
-        ctx = PagedContext(cache, build_metadata(bm, [seq], [query_len], device))
-        token = sample(model(ids, positions, ctx)[-1], params, generator)
-        if token in stop_ids:
-            return "stop"
-        yield token
-        bm.append_slots(seq, 1)
-        ids = torch.tensor([token], device=device)
-        positions = torch.tensor([len(prompt_ids) + n - 1], device=device)
-        query_len = 1
-    return "length"
-
-
-def _find_stop(text: str, stops: list[str]) -> int | None:
-    hits = [i for s in stops if (i := text.find(s)) != -1]
-    return min(hits) if hits else None
-
-
-def _partial_stop_suffix(text: str, stops: list[str]) -> int:
-    """Length of the longest suffix of `text` that is a proper prefix of some stop string."""
-    best = 0
-    for s in stops:
-        for n in range(min(len(s) - 1, len(text)), best, -1):
-            if text.endswith(s[:n]):
-                best = n
-                break
-    return best
+    for out in generate_stream(model, config, prompt_ids, params, tokenizer, max_context):
+        if out.new_text:
+            yield out.new_text

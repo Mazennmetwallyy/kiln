@@ -62,8 +62,8 @@ class _ForceToken(nn.Module):
         super().__init__()
         self.inner, self.token_id = inner, token_id
 
-    def forward(self, ids, positions, cache):
-        logits = self.inner(ids, positions, cache)
+    def forward(self, ids, positions, cache, logits_indices=None):
+        logits = self.inner(ids, positions, cache, logits_indices=logits_indices)
         logits[:, self.token_id] += 1e4
         return logits
 
@@ -112,11 +112,11 @@ class _Scripted(nn.Module):
         self.script, self.vocab, self.calls = script, vocab, 0
         self.dummy = nn.Parameter(torch.zeros(1))
 
-    def forward(self, ids, positions, cache):
+    def forward(self, ids, positions, cache, logits_indices=None):
         logits = torch.zeros(len(ids), self.vocab)
         logits[-1, self.script[min(self.calls, len(self.script) - 1)]] = 1.0
         self.calls += 1
-        return logits
+        return logits if logits_indices is None else logits[logits_indices]
 
 
 def _fake_config(vocab):
