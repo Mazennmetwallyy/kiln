@@ -9,12 +9,16 @@ from typing import Literal
 import torch
 from torch import nn
 
+from kiln.attention.metadata import build_metadata
+from kiln.attention.torch_paged import PagedContext
+from kiln.cache import BlockManager
+from kiln.cache.paged import PagedKVCache
 from kiln.model.config import ModelConfig
-from kiln.model.kv_cache import ContiguousKVCache
 from kiln.sampling import SamplingParams, sample
 from kiln.tokenizer import IncrementalDetokenizer, Tokenizer
 
 FinishReason = Literal["stop", "length"]
+BLOCK_SIZE = 16
 
 
 @dataclass
@@ -89,23 +93,29 @@ def _token_stream(model: nn.Module, config: ModelConfig, prompt_ids: list[int], 
 
     weight = next(model.parameters())
     device = weight.device
-    cache = ContiguousKVCache(config, max_tokens=total, dtype=weight.dtype, device=device)
+    num_blocks = -(-total // BLOCK_SIZE)
+    bm = BlockManager(num_blocks, BLOCK_SIZE)
+    cache = PagedKVCache(config, num_blocks, BLOCK_SIZE, weight.dtype, device)
     generator = torch.Generator().manual_seed(params.seed) if params.seed is not None else None
     stop_ids = set(params.stop_token_ids)
     if not params.ignore_eos:
         stop_ids.update(config.eos_token_ids)
 
+    seq = 0
+    bm.allocate(seq, len(prompt_ids))
     ids = torch.tensor(prompt_ids, device=device)
     positions = torch.arange(len(prompt_ids), device=device)
-    cache.set_positions(0, len(prompt_ids))
+    query_len = len(prompt_ids)
     for n in range(1, params.max_tokens + 1):
-        token = sample(model(ids, positions, cache)[-1], params, generator)
+        ctx = PagedContext(cache, build_metadata(bm, [seq], [query_len], device))
+        token = sample(model(ids, positions, ctx)[-1], params, generator)
         if token in stop_ids:
             return "stop"
         yield token
+        bm.append_slots(seq, 1)
         ids = torch.tensor([token], device=device)
         positions = torch.tensor([len(prompt_ids) + n - 1], device=device)
-        cache.set_positions(len(prompt_ids) + n - 1, 1)
+        query_len = 1
     return "length"
 
 

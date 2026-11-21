@@ -91,3 +91,65 @@ Stop strings add a second wrinkle. If the stop string is `"o w"` and the model e
 - Why is decode memory-bandwidth-bound while prefill is compute-bound?
 - Top-p vs top-k: when does each behave badly?
 - Why can't you stream text by decoding one token at a time?
+
+---
+
+## M2: The paged KV cache
+
+### The problem: reserving memory you might never use
+
+A simple server gives each request one contiguous KV buffer sized for the **maximum** length it might reach, because the cache can't easily grow in place. Most requests stop far short of the maximum, so most of that memory sits reserved and unused. The vLLM paper measured only 20–38% of KV memory actually holding tokens in such systems. On an 8 GB laptop, that waste directly limits how many people you can serve at once.
+
+### The fix: paging, borrowed from operating systems
+
+Kiln splits KV memory into fixed-size **blocks** of 16 tokens (`kiln/cache/`):
+
+```
+physical pool (one flat tensor per layer):  [blk0][blk1][blk2][blk3][blk4][blk5] ...
+sequence A, 40 tokens -> block table [0, 3, 4]   (16 + 16 + 8 used)
+sequence B, 10 tokens -> block table [1]
+free list: [2, 5, ...]
+```
+
+- A sequence's **block table** maps its logical positions to physical blocks, just as a page table maps virtual pages to physical frames. Blocks need not be next to each other.
+- Memory is allocated one block at a time as a sequence grows. The waste is at most 15 token slots per sequence.
+- Token *p* of a sequence lives at **slot** `table[p // 16] * 16 + p % 16`. Each step, `slot_mapping` tells attention where to write the new tokens' K and V.
+
+### Sharing: reference counts and copy-on-write
+
+Blocks are **reference counted**, so several sequences can point at the same block:
+- `fork(parent, child)` lets the child share all of the parent's blocks. This is free: it's just refcount + 1. M6 uses the same mechanism to share a common system prompt across many requests.
+- If a sequence wants to write into a **shared, partly filled** last block, the block manager gives it a fresh block and asks the caller to copy the old one first (**copy-on-write**). Full shared blocks are never written again, so they stay shared.
+- `rollback(n)` forgets the last *n* tokens and returns emptied blocks. Speculative decoding (M7) needs this to discard rejected guesses.
+
+The block manager does bookkeeping only. It never touches tensors, which makes it easy to test. A Hypothesis *stateful* test throws random sequences of allocate/append/fork/rollback/free at it, 300 times, and checks after every step that:
+- refcounts equal the number of block tables pointing at each block;
+- every table has exactly `ceil(len / 16)` blocks;
+- free + used = total;
+- freeing everything returns every block.
+
+### Attention over paged memory
+
+`PagedContext` (`kiln/attention/torch_paged.py`) works in two steps:
+1. **Write:** scatter the new K/V into the pool at `slot_mapping`.
+2. **Read:**
+   - **Prefill, or a mix of prefill and decode:** for each sequence, gather its slots for positions 0…len−1 and run causal attention, where the query at position *p* sees keys ≤ *p*.
+   - **Pure decode:** every sequence adds one token, so gather all sequences' K/V into one padded tensor with a length mask and run **one** batched attention call.
+
+The tests check paged attention against the simple contiguous cache in five cases:
+- a single sequence crossing many blocks;
+- two prompts in one flat batch (any mask leak between sequences would show up here);
+- one sequence decoding while another prefills;
+- a batch of decodes;
+- two forked sequences writing different tokens after copy-on-write.
+
+### Why lengths are Python ints
+
+Asking a GPU tensor for a value (`int(tensor)`) makes the CPU wait for the GPU to finish everything queued so far. M1 did this twice per layer per token. M2 keeps all lengths as plain Python ints in the step's metadata and builds gather indices once per step. Single-request decode on the Mac GPU went from 23.5 to **32.0 tokens/s** from that change alone. Output stayed token-for-token identical to Hugging Face on all 24 real-model tests.
+
+### Questions to be ready for
+- Why does contiguous per-request allocation waste memory, and how much does paging waste at most?
+- What's in a block table, and how do you find the slot for token *p*?
+- Why does writing into a shared block need copy-on-write, and why only for the *last, partly filled* block?
+- What does `rollback` do, and which feature needs it?
+- Why does `int(gpu_tensor)` hurt performance?
