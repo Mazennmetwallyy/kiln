@@ -4,7 +4,8 @@ Requests share one of three system prompts (prefix-cache hits: shared, orange bl
 than a deliberately small pool can hold (preemption), and finish at different times (cached,
 evictable blocks).
 
-    kiln serve --model Qwen/Qwen2.5-0.5B-Instruct --kv-memory-gb 0.03 --port 8000
+    kiln serve --model Qwen/Qwen2.5-0.5B-Instruct --kv-memory-gb 0.025 \
+        --attention-backend metal --enable-viz --port 8000
     python -m bench.demo_viz --url http://127.0.0.1:8000 --requests 40 --rate 3
     open http://127.0.0.1:8000/viz
 """

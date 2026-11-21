@@ -52,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--no-prefix-caching", action="store_true", help="recompute shared prompt prefixes every time")
     sv.add_argument("--draft-model", default=None, help="small model with the same tokenizer, for speculative decoding")
     sv.add_argument("--num-speculative-tokens", type=int, default=4, help="draft tokens proposed per step")
+    sv.add_argument("--enable-viz", action="store_true",
+                    help="serve the KV-cache visualiser at /viz (shows every request's blocks: trusted users only)")
     sv.add_argument("--attention-backend", default="torch", choices=["torch", "metal"],
                     help="metal: the hand-written paged-attention decode kernel (Apple GPU)")
     sv.add_argument("--host", default="127.0.0.1")
@@ -115,8 +117,8 @@ def serve(args: argparse.Namespace) -> int:
                        attention_backend=args.attention_backend)
     print(f"kiln: {args.model} on {args.device} ({args.dtype or dtype}), KV pool {num_blocks} blocks "
           f"x {args.block_size} = {num_blocks * args.block_size} tokens", file=sys.stderr)
-    uvicorn.run(create_app(AsyncEngine(engine), tok, args.model), host=args.host, port=args.port,
-                log_level="warning")
+    uvicorn.run(create_app(AsyncEngine(engine), tok, args.model, enable_viz=args.enable_viz), host=args.host,
+                port=args.port, log_level="warning")
     return 0
 
 

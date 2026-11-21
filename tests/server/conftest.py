@@ -38,7 +38,7 @@ def server(tiny_text_model_dir):
     model, config = load_model(tiny_text_model_dir)
     tok = Tokenizer.from_hf_dir(tiny_text_model_dir)
     ae = AsyncEngine(LLMEngine(model, config, tok, num_blocks=128, block_size=16))
-    app = create_app(ae, tok, model_name="tiny")
+    app = create_app(ae, tok, model_name="tiny", enable_viz=True)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]

@@ -123,3 +123,22 @@ def test_kv_visualiser_endpoints(server, client):
         assert r.headers["content-type"].startswith("text/event-stream")
         line = next(line for line in r.iter_lines() if line.startswith("data: "))
     assert json.loads(line[6:])["num_blocks"] == snap["num_blocks"]
+
+
+def test_kv_visualiser_is_off_by_default(tiny_text_model_dir):
+    # Per-request block ownership and sharing are a side channel between users: opt-in only.
+    from kiln.engine.engine import LLMEngine
+    from kiln.model.loader import load_model
+    from kiln.server.app import create_app
+    from kiln.server.async_engine import AsyncEngine
+    from kiln.tokenizer import Tokenizer
+
+    model, config = load_model(tiny_text_model_dir)
+    tok = Tokenizer.from_hf_dir(tiny_text_model_dir)
+    app = create_app(AsyncEngine(LLMEngine(model, config, tok, num_blocks=8)), tok, model_name="tiny")
+
+    async def get(path):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            return (await asyncio.wait_for(c.get(path), 5)).status_code
+
+    assert [asyncio.run(get(p)) for p in ["/viz", "/kv", "/kv/stream"]] == [404, 404, 404]
