@@ -12,6 +12,7 @@ import gc
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import torch
 from huggingface_hub import snapshot_download
@@ -67,7 +68,8 @@ def main() -> None:
     del model
     gc.collect()
     torch.mps.empty_cache()
-    hf = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float16).to("mps").eval()
+    hf: Any = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float16)
+    hf = hf.to("mps").eval()
     hf_run(hf, 2)
     for b in BATCHES:
         out["hf_static"][b] = hf_run(hf, b)
