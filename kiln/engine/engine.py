@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
+from kiln.attention import metal
 from kiln.attention.metadata import build_metadata
 from kiln.attention.torch_paged import PagedContext
 from kiln.cache import BlockManager
@@ -62,7 +63,7 @@ class LLMEngine:
                  block_size: int = 16, max_num_seqs: int = 32, max_batched_tokens: int = 512,
                  max_context: int | None = None, enable_prefix_caching: bool = True,
                  draft_model: nn.Module | None = None, draft_config: ModelConfig | None = None,
-                 num_speculative_tokens: int = 0):
+                 num_speculative_tokens: int = 0, attention_backend: str = "torch"):
         self.model = model
         self.config = config
         self.tokenizer = tokenizer
@@ -70,6 +71,13 @@ class LLMEngine:
         self.device = weight.device
         self.bm = BlockManager(num_blocks, block_size, enable_prefix_caching=enable_prefix_caching)
         self.cache = PagedKVCache(config, num_blocks, block_size, weight.dtype, self.device)
+        if attention_backend not in ("torch", "metal"):
+            raise ValueError(f"unknown attention backend {attention_backend!r}")
+        if attention_backend == "metal" and not all(
+                metal.supported(weight.dtype, c.head_dim) and weight.device.type == "mps"
+                for c in [config, *([draft_config] if draft_config is not None else [])]):
+            raise ValueError("the metal backend needs an MPS device, fp16/fp32 and head_dim a multiple of 32")
+        self.backend = attention_backend
         self.draft = draft_model
         self.k = num_speculative_tokens
         self.draft_cache: PagedKVCache | None = None
@@ -160,7 +168,7 @@ class LLMEngine:
                               [s.num_tokens for s in plan.scheduled], self.device)
         rows = torch.tensor([r for r, _ in to_sample], dtype=torch.long, device=self.device)
         logits = self.model(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
-                            PagedContext(self.cache, meta), logits_indices=rows)
+                            PagedContext(self.cache, meta, self.backend), logits_indices=rows)
         if self.draft is not None:
             self._draft_catch_up([s.seq for s in plan.scheduled])
         for s in plan.scheduled:  # newly completed full blocks join the prefix cache
@@ -187,7 +195,7 @@ class LLMEngine:
                               self.device, seq_lens=[s.num_computed for s in live])
         assert self.draft is not None and self.draft_cache is not None
         self.draft(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
-                   PagedContext(self.draft_cache, meta), logits_indices=torch.empty(0, dtype=torch.long,
+                   PagedContext(self.draft_cache, meta, self.backend), logits_indices=torch.empty(0, dtype=torch.long,
                                                                                     device=self.device))
         for seq in live:
             seq.draft_computed = seq.num_computed
@@ -229,7 +237,7 @@ class LLMEngine:
             meta = build_metadata(self.bm, [seqs[b].seq_id for b in active], qlens, self.device, seq_lens=visible)
             rows = torch.tensor(list(itertools.accumulate(qlens)), device=self.device) - 1
             logits = self.draft(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
-                                PagedContext(self.draft_cache, meta), logits_indices=rows)
+                                PagedContext(self.draft_cache, meta, self.backend), logits_indices=rows)
             results = self._propose(logits, [seqs[b] for b in active], [drafts[b] for b in active],
                                     [draft_probs[b] for b in active])
             for b, ok in zip(active, results, strict=True):
@@ -249,7 +257,7 @@ class LLMEngine:
             positions += range(L - 1, L + len(d))
         meta = build_metadata(self.bm, [s.seq_id for s in seqs], [k + 1 for k in ks], self.device)
         logits = self.model(torch.tensor(ids, device=self.device), torch.tensor(positions, device=self.device),
-                            PagedContext(self.cache, meta))
+                            PagedContext(self.cache, meta, self.backend))
 
         outputs: list[RequestOutput] = []
         offsets = [0, *itertools.accumulate(k + 1 for k in ks)]

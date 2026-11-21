@@ -9,15 +9,19 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from kiln.attention import metal
 from kiln.attention.base import sdpa_gqa
 from kiln.attention.metadata import AttentionMetadata
 from kiln.cache.paged import PagedKVCache
 
 
 class PagedContext:
-    def __init__(self, cache: PagedKVCache, meta: AttentionMetadata):
+    def __init__(self, cache: PagedKVCache, meta: AttentionMetadata, backend: str = "torch"):
+        """backend "metal": decode steps run the hand-written kernel (kiln/attention/metal.py) instead of
+        gather + SDPA. Prefill and mixed steps always use the PyTorch path."""
         self.cache = cache
         self.meta = meta
+        self.backend = backend
 
     def attend(self, layer: int, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         meta = self.meta
@@ -25,6 +29,10 @@ class PagedContext:
         k_pool[meta.slot_mapping] = k
         v_pool[meta.slot_mapping] = v
 
+        if meta.is_pure_decode and self.backend == "metal":
+            assert meta.block_tables_t is not None and meta.seq_lens_t is not None
+            return metal.paged_decode_attention(q, k_pool, v_pool, meta.block_tables_t, meta.seq_lens_t,
+                                                meta.block_size)
         if meta.is_pure_decode:
             assert meta.decode_slots is not None
             keys = k_pool[meta.decode_slots].transpose(1, 2)  # [B, Hkv, L, D]

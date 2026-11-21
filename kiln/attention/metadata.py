@@ -21,6 +21,9 @@ class AttentionMetadata:
     context_slots: list[Tensor] = field(default_factory=list)  # per seq: slots for positions [0, len)
     decode_slots: Tensor | None = None  # [B, max_len] when every query_len == 1
     decode_mask: Tensor | None = None  # [B, 1, 1, max_len] True where the slot is real
+    # For the Metal decode kernel, which reads the pool through block tables instead of gathered slots:
+    block_tables_t: Tensor | None = None  # [B, max_blocks] int32, padded with 0
+    seq_lens_t: Tensor | None = None  # [B] int32
 
     @property
     def is_pure_decode(self) -> bool:
@@ -53,6 +56,11 @@ def build_metadata(bm: BlockManager, seq_ids: list[int], query_lens: list[int],
         meta.decode_slots = torch.tensor(padded, dtype=torch.long, device=device)
         lens = torch.tensor(seq_lens, device=device)
         meta.decode_mask = (torch.arange(width, device=device)[None, :] < lens[:, None])[:, None, None, :]
+        tables = meta.block_tables
+        nb = max(len(t) for t in tables)
+        meta.block_tables_t = torch.tensor([t + [0] * (nb - len(t)) for t in tables], dtype=torch.int32,
+                                           device=device)
+        meta.seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
     else:
         meta.context_slots = [torch.tensor(c, dtype=torch.long, device=device) for c in context]
     return meta
