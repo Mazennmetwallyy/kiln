@@ -220,3 +220,25 @@ def test_identical_prompts_reuse_all_but_last_token(tiny):
                                                                          ignore_eos=True))
     assert tokens["b"] == hf_greedy(hf, prompt, 5)
     assert engine.stats().prefix_cache_hit_tokens == 16
+
+
+def test_kv_snapshot_shows_ownership_sharing_and_cached_blocks(tiny):
+    model, config, _ = tiny
+    engine = LLMEngine(model, config, None, num_blocks=32, block_size=4)
+    shared = list(range(3, 15))  # 3 full blocks
+    params = SamplingParams(temperature=0, max_tokens=3, ignore_eos=True)
+    engine.add_request("a", [*shared, 40], params)
+    engine.step()  # a is prefilled; its 3 full blocks are now in the prefix cache
+    engine.add_request("b", [*shared, 41], params)
+    engine.step()  # b reuses a's 3 blocks
+    snap = engine.kv_snapshot()
+    assert snap["num_blocks"] == 32 and len(snap["state"]) == 32 == len(snap["owner"])
+    assert snap["state"].count(2) == 3  # shared by a and b
+    assert {r["id"] for r in snap["requests"]} == {"a", "b"}
+    a_seq = next(r["seq"] for r in snap["requests"] if r["id"] == "a")
+    assert all(snap["owner"][b] == a_seq for b in range(32) if snap["state"][b] == 2)
+    while engine.has_unfinished():
+        engine.step()
+    snap = engine.kv_snapshot()
+    assert snap["requests"] == [] and snap["state"].count(1) == snap["state"].count(2) == 0
+    assert snap["state"].count(3) >= 3  # finished requests' full blocks stay cached (evictable)

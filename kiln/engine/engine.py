@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 from torch import nn
@@ -139,6 +140,38 @@ class LLMEngine:
                            sch.num_preemptions, sch.prefix_query_tokens, sch.prefix_hit_tokens,
                            self.bm.num_cached_blocks, self.spec_proposed, self.spec_accepted,
                            self.target_forwards)
+
+    def kv_snapshot(self) -> dict[str, Any]:
+        """What the KV visualiser draws: every block's state and owner, and every live request.
+        Call it on the engine thread (it reads the block manager without locks)."""
+        snap = self.bm.snapshot()
+        refcount: list[int] = snap["refcount"]  # type: ignore[assignment]
+        cached: list[bool] = snap["cached"]  # type: ignore[assignment]
+        tables: dict[int, list[int]] = snap["tables"]  # type: ignore[assignment]
+        owner = [-1] * self.bm.num_blocks
+        for sid, table in tables.items():
+            for b in table:
+                if owner[b] == -1:
+                    owner[b] = sid
+        state = []
+        for b in range(self.bm.num_blocks):
+            if refcount[b] > 1:
+                state.append(2)  # shared (prefix cache hit, or fork)
+            elif refcount[b] == 1:
+                state.append(1)  # used by one request
+            else:
+                state.append(3 if cached[b] else 0)  # 3: cached and evictable, 0: free
+        seqs = [*self.scheduler.running, *self.scheduler.waiting]
+        s = self.stats()
+        return {
+            "num_blocks": self.bm.num_blocks, "block_size": self.bm.block_size, "state": state, "owner": owner,
+            "requests": [{"id": q.request_id, "seq": q.seq_id, "status": q.status.value, "prompt": len(q.prompt_ids),
+                          "output": len(q.output_ids), "blocks": len(tables.get(q.seq_id, [])),
+                          "preemptions": q.num_preemptions} for q in seqs],
+            "stats": {"running": s.num_running, "waiting": s.num_waiting, "preemptions": s.num_preemptions_total,
+                      "prefix_query": s.prefix_cache_query_tokens, "prefix_hit": s.prefix_cache_hit_tokens,
+                      "spec_proposed": s.spec_proposed_tokens, "spec_accepted": s.spec_accepted_tokens},
+        }
 
     @torch.no_grad()
     def step(self) -> list[RequestOutput]:

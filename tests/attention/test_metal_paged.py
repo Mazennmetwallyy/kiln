@@ -17,9 +17,10 @@ def _reference(q, k_pool, v_pool, tables, lens, bs):
     return torch.stack(outs)
 
 
+@pytest.mark.parametrize("partition", [256, 32, 7])  # 256: no split for most; 32 and 7: split-K + merge
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.parametrize(("heads", "kv_heads", "head_dim"), [(4, 4, 64), (8, 2, 64), (12, 2, 128), (14, 2, 64)])
-def test_matches_reference(dtype, heads, kv_heads, head_dim):
+def test_matches_reference(dtype, heads, kv_heads, head_dim, partition):
     from kiln.attention.metal import paged_decode_attention
 
     g = torch.Generator().manual_seed(0)
@@ -38,7 +39,7 @@ def test_matches_reference(dtype, heads, kv_heads, head_dim):
     q = torch.randn(len(lens), heads, head_dim, generator=g).to("mps", dtype)
     t = torch.tensor([tb + [0] * (width - len(tb)) for tb in tables], dtype=torch.int32, device="mps")
     n = torch.tensor(lens, dtype=torch.int32, device="mps")
-    got = paged_decode_attention(q, k_pool, v_pool, t, n, bs).float()
+    got = paged_decode_attention(q, k_pool, v_pool, t, n, bs, max(lens), partition=partition).float()
     want = _reference(q, k_pool, v_pool, tables, lens, bs)
     tol = 1e-5 if dtype == torch.float32 else 2e-3
     assert torch.allclose(got, want, atol=tol, rtol=tol), (got - want).abs().max()

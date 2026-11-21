@@ -196,6 +196,11 @@ class BlockManager:
         for b in table:
             self._release(b)
 
+    def snapshot(self) -> dict[str, object]:
+        """A copy of the pool's state for display: refcount and cached flag per block, and block tables."""
+        return {"refcount": list(self._ref), "cached": [b in self._key_of for b in range(self.num_blocks)],
+                "tables": {sid: list(t) for sid, t in self._tables.items()}}
+
     def check_invariants(self) -> None:
         """Expensive consistency check, for tests."""
         counts = [0] * self.num_blocks

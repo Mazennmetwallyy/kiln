@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiln KV cache</title>
+<style>
+  :root {
+    --surface: #fcfcfb; --surface-2: #f3f2ee; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --free: #ecebe6;
+    --used: #2a78d6; --shared: #eb6834; --cached: #1baf7a; --focus: #0b0b0b;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19; --surface-2: #232321; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8f8e86;
+      --line: #33332f; --free: #2a2a27;
+      --used: #3987e5; --shared: #d95926; --cached: #199e70; --focus: #f0efec;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface); color: var(--ink);
+         font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 32px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--ink-2); }
+  .live { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--cached); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .tile { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { color: var(--ink-2); font-size: 12px; }
+  .tile .v { font-size: 22px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .tile .v small { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; }
+  @media (max-width: 860px) { .body { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--surface-2); border-radius: 8px; padding: 12px; min-width: 0; }
+  .panel h2 { font-size: 13px; margin: 0 0 8px; color: var(--ink-2); font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; color: var(--ink-2); font-size: 12px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  canvas { display: block; width: 100%; touch-action: none; }
+  #tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--surface); padding: 6px 8px;
+         border-radius: 6px; font-size: 12px; opacity: 0; transition: opacity .08s; white-space: nowrap; z-index: 2; }
+  .reqs { max-height: 560px; overflow: auto; }
+  .req { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 6px 8px; border-radius: 6px; cursor: default; }
+  .req:hover, .req.hl { background: var(--surface); }
+  .req .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+  .req .meta { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--used); border-radius: 2px; }
+  .req.waiting .bar i { background: var(--muted); }
+  .badge { font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid var(--line); color: var(--ink-2); margin-left: 6px; }
+  .empty { color: var(--muted); padding: 8px; }
+  #events { margin-top: 12px; color: var(--ink-2); font-size: 12px; min-height: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>KV cache</h1>
+    <span class="sub" id="pool">connecting…</span>
+    <span class="live"><span class="dot" id="dot"></span><span id="status">offline</span></span>
+  </header>
+
+  <section class="tiles">
+    <div class="tile"><div class="k">Blocks in use</div><div class="v" id="t-used">–</div></div>
+    <div class="tile"><div class="k">Running</div><div class="v" id="t-running">–</div></div>
+    <div class="tile"><div class="k">Waiting</div><div class="v" id="t-waiting">–</div></div>
+    <div class="tile"><div class="k">Preemptions</div><div class="v" id="t-preempt">–</div></div>
+    <div class="tile"><div class="k">Prefix-cache hits</div><div class="v" id="t-hit">–</div></div>
+    <div class="tile"><div class="k">Draft acceptance</div><div class="v" id="t-spec">–</div></div>
+  </section>
+
+  <section class="body">
+    <div class="panel">
+      <div class="legend">
+        <span><i class="sw" style="background:var(--used)"></i>Used by one request</span>
+        <span><i class="sw" style="background:var(--shared)"></i>Shared (refcount &gt; 1)</span>
+        <span><i class="sw" style="background:var(--cached)"></i>Cached, evictable</span>
+        <span><i class="sw" style="background:var(--free)"></i>Free</span>
+      </div>
+      <canvas id="grid" aria-label="KV cache blocks"></canvas>
+      <div id="events"></div>
+    </div>
+    <div class="panel">
+      <h2>Requests</h2>
+      <div class="reqs" id="reqs"><div class="empty">No requests in flight.</div></div>
+    </div>
+  </section>
+</main>
+<div id="tip"></div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const canvas = $("grid"), ctx = canvas.getContext("2d"), tip = $("tip");
+const STATE_NAMES = ["Free", "Used by one request", "Shared", "Cached, evictable"];
+let snap = null, highlight = null, layout = null;
+const lastPreempt = new Map();
+
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+function computeLayout(n) {
+  const width = canvas.clientWidth;
+  // Pick the largest cell (2px gap) that fits all blocks in at most ~560px of height.
+  let cell = 22;
+  while (cell > 4) {
+    const cols = Math.max(1, Math.floor((width + 2) / (cell + 2)));
+    if (Math.ceil(n / cols) * (cell + 2) <= 560) break;
+    cell--;
+  }
+  const cols = Math.max(1, Math.floor((width + 2) / (cell + 2)));
+  return { cell, cols, rows: Math.ceil(n / cols), width };
+}
+
+function draw() {
+  if (!snap) return;
+  const n = snap.num_blocks;
+  layout = computeLayout(n);
+  const { cell, cols, rows } = layout;
+  const dpr = window.devicePixelRatio || 1;
+  const h = rows * (cell + 2) - 2;
+  canvas.style.height = h + "px";
+  canvas.width = Math.round(layout.width * dpr);
+  canvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const colors = [css("--free"), css("--used"), css("--shared"), css("--cached")];
+  const focus = css("--focus"), r = Math.min(3, cell / 4);
+  for (let b = 0; b < n; b++) {
+    const x = (b % cols) * (cell + 2), y = Math.floor(b / cols) * (cell + 2);
+    ctx.fillStyle = colors[snap.state[b]];
+    ctx.beginPath(); ctx.roundRect(x, y, cell, cell, r); ctx.fill();
+    if (highlight !== null && snap.owner[b] === highlight && snap.state[b] !== 0) {
+      ctx.strokeStyle = focus; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.roundRect(x + 0.75, y + 0.75, cell - 1.5, cell - 1.5, r); ctx.stroke();
+    }
+  }
+}
+
+function fmtPct(num, den) { return den > 0 ? Math.round((100 * num) / den) + "%" : "–"; }
+
+function render(s) {
+  const prev = snap;
+  snap = s;
+  const used = s.state.filter((x) => x === 1 || x === 2).length;
+  $("pool").textContent = `${s.num_blocks} blocks × ${s.block_size} tokens`;
+  $("t-used").innerHTML = `${used}<small> / ${s.num_blocks}</small>`;
+  $("t-running").textContent = s.stats.running;
+  $("t-waiting").textContent = s.stats.waiting;
+  $("t-preempt").textContent = s.stats.preemptions;
+  $("t-hit").innerHTML = `${fmtPct(s.stats.prefix_hit, s.stats.prefix_query)}<small> of prompt tokens</small>`;
+  $("t-spec").textContent = fmtPct(s.stats.spec_accepted, s.stats.spec_proposed);
+
+  for (const q of s.requests) {
+    const before = lastPreempt.get(q.seq) ?? 0;
+    if (q.preemptions > before && prev) $("events").textContent = `Preempted ${q.id}: its blocks were freed; it will recompute.`;
+    lastPreempt.set(q.seq, q.preemptions);
+  }
+  const list = $("reqs");
+  if (!s.requests.length) { list.innerHTML = '<div class="empty">No requests in flight.</div>'; }
+  else {
+    const maxBlocks = Math.max(1, ...s.requests.map((q) => q.blocks));
+    list.innerHTML = s.requests.map((q) => `
+      <div class="req ${q.status}${highlight === q.seq ? " hl" : ""}" data-seq="${q.seq}">
+        <span class="id">${escapeHtml(q.id)}${q.preemptions ? `<span class="badge">preempted ×${q.preemptions}</span>` : ""}</span>
+        <span class="meta">${q.status === "waiting" ? "waiting" : `${q.prompt}+${q.output} tok · ${q.blocks} blk`}</span>
+        <span class="bar"><i style="width:${(100 * q.blocks) / maxBlocks}%"></i></span>
+      </div>`).join("");
+  }
+  draw();
+}
+
+function escapeHtml(t) { return t.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
+
+$("reqs").addEventListener("mouseover", (e) => {
+  const row = e.target.closest(".req");
+  const seq = row ? Number(row.dataset.seq) : null;
+  if (seq !== highlight) { highlight = seq; draw(); }
+});
+$("reqs").addEventListener("mouseleave", () => { highlight = null; draw(); });
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!snap || !layout) return;
+  const rect = canvas.getBoundingClientRect();
+  const col = Math.floor((e.clientX - rect.left) / (layout.cell + 2));
+  const row = Math.floor((e.clientY - rect.top) / (layout.cell + 2));
+  const b = row * layout.cols + col;
+  if (col >= layout.cols || b < 0 || b >= snap.num_blocks) { tip.style.opacity = 0; return; }
+  const owner = snap.owner[b];
+  const req = snap.requests.find((q) => q.seq === owner);
+  tip.textContent = `Block ${b} · ${STATE_NAMES[snap.state[b]]}${req ? ` · ${req.id}` : ""}`;
+  tip.style.left = Math.min(e.clientX + 12, window.innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = e.clientY + 14 + "px";
+  tip.style.opacity = 1;
+  if (owner !== highlight) { highlight = owner >= 0 ? owner : null; draw(); }
+});
+canvas.addEventListener("pointerleave", () => { tip.style.opacity = 0; highlight = null; draw(); });
+
+new ResizeObserver(() => draw()).observe(canvas);
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+
+function connect() {
+  const es = new EventSource("kv/stream");
+  es.onopen = () => { $("dot").classList.add("on"); $("status").textContent = "live"; };
+  es.onmessage = (e) => render(JSON.parse(e.data));
+  es.onerror = () => { $("dot").classList.remove("on"); $("status").textContent = "reconnecting…"; };
+}
+fetch("kv").then((r) => r.json()).then(render).catch(() => {});
+connect();
+</script>
+</body>
+</html>

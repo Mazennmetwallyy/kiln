@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 
 import httpx
@@ -109,3 +110,16 @@ def test_non_finite_temperature_is_400(server):
     body = '{"model": "tiny", "prompt": "x", "max_tokens": 2, "temperature": Infinity}'
     r = httpx.post(f"{server[0]}/v1/completions", content=body, headers={"content-type": "application/json"})
     assert r.status_code == 400
+
+
+def test_kv_visualiser_endpoints(server, client):
+    base = server[0]
+    page = httpx.get(f"{base}/viz")
+    assert page.status_code == 200 and "KV cache" in page.text and "kv/stream" in page.text
+    snap = httpx.get(f"{base}/kv").json()
+    assert {"num_blocks", "block_size", "state", "owner", "requests", "stats"} <= snap.keys()
+    assert len(snap["state"]) == snap["num_blocks"]
+    with httpx.stream("GET", f"{base}/kv/stream", timeout=5) as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        line = next(line for line in r.iter_lines() if line.startswith("data: "))
+    assert json.loads(line[6:])["num_blocks"] == snap["num_blocks"]

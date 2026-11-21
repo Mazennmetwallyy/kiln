@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from importlib import resources
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from kiln.engine.engine import RequestOutput
 from kiln.server.async_engine import AsyncEngine
+from kiln.server.kv_view import KVView
 from kiln.server.metrics import Metrics
 from kiln.server.protocol import ChatCompletionRequest, CompletionRequest
 from kiln.tokenizer import Tokenizer
@@ -31,6 +34,8 @@ def _error(message: str, status: int = 400) -> JSONResponse:
 def create_app(engine: AsyncEngine, tokenizer: Tokenizer, model_name: str) -> FastAPI:
     metrics = Metrics()
     engine.on_step.append(metrics.on_step)
+    kv_view = KVView(engine.engine)
+    engine.on_step.append(kv_view.on_step)
     max_context = engine.engine.max_context
 
     @asynccontextmanager
@@ -49,6 +54,30 @@ def create_app(engine: AsyncEngine, tokenizer: Tokenizer, model_name: str) -> Fa
     @app.exception_handler(ValueError)
     async def _bad_value(_: Request, exc: ValueError) -> JSONResponse:
         return _error(str(exc))
+
+    @app.get("/viz", response_class=HTMLResponse)
+    async def viz() -> str:
+        """The live KV-pool visualiser."""
+        return resources.files("kiln.server").joinpath("static/viz.html").read_text()
+
+    @app.get("/kv")
+    async def kv() -> dict[str, Any]:
+        return kv_view.latest()[1]
+
+    @app.get("/kv/stream")
+    async def kv_stream(request: Request) -> StreamingResponse:
+        """Server-Sent Events: a new snapshot whenever the pool changes (at most ~10 per second)."""
+
+        async def events() -> AsyncIterator[str]:
+            seen = -1
+            while not await request.is_disconnected():
+                version, snapshot = kv_view.latest()
+                if version != seen:
+                    seen = version
+                    yield f"data: {json.dumps(snapshot, separators=(',', ':'))}\n\n"
+                await asyncio.sleep(0.1)
+
+        return StreamingResponse(events(), media_type="text/event-stream")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

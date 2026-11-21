@@ -22,6 +22,9 @@ kiln = "kiln.cli:main"
 [tool.setuptools.packages.find]
 include = ["kiln*"]
 
+[tool.setuptools.package-data]
+"kiln.server" = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
