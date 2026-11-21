@@ -12,12 +12,13 @@ _COMMON = {
 }
 
 
-def make_tiny_hf_model(arch: str, tmp_path: Path, tied: bool = True, seed: int = 0):
+def make_tiny_hf_model(arch: str, tmp_path: Path, tied: bool = True, seed: int = 0, **overrides):
     torch.manual_seed(seed)
+    kwargs = {**_COMMON, **overrides}
     if arch == "qwen2":
-        model = Qwen2ForCausalLM(Qwen2Config(tie_word_embeddings=tied, **_COMMON))
+        model = Qwen2ForCausalLM(Qwen2Config(tie_word_embeddings=tied, **kwargs))
     elif arch == "llama":
-        model = LlamaForCausalLM(LlamaConfig(tie_word_embeddings=tied, **_COMMON))
+        model = LlamaForCausalLM(LlamaConfig(tie_word_embeddings=tied, **kwargs))
     else:
         raise ValueError(arch)
     model = model.float().eval()

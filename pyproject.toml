@@ -7,10 +7,13 @@ name = "kiln"
 version = "0.1.0"
 description = "An LLM inference engine built from scratch: paged KV cache, continuous batching, speculative decoding, Metal kernels."
 requires-python = ">=3.10"
-dependencies = ["torch", "safetensors", "tokenizers", "huggingface_hub", "jinja2"]
+dependencies = [
+    "torch", "safetensors", "tokenizers", "huggingface_hub", "jinja2",
+    "fastapi", "uvicorn", "prometheus_client",
+]
 
 [project.optional-dependencies]
-dev = ["pytest", "hypothesis", "ruff", "mypy", "transformers"]
+dev = ["pytest", "hypothesis", "ruff", "mypy", "transformers", "openai", "httpx"]
 
 [project.scripts]
 kiln = "kiln.cli:main"
