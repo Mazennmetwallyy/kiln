@@ -11,7 +11,6 @@ from pathlib import Path
 
 import torch
 import uvicorn
-from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from kiln.cli import resolve_model_dir
@@ -27,6 +26,27 @@ MAX_IN_FLIGHT = 24  # a public demo on 2 vCPUs: refuse rather than queue for min
 PAGE = (Path(__file__).parent / "index.html").read_text()
 
 
+class InFlightLimit:
+    """Refuse POSTs to /v1/ beyond `limit` at once. Pure ASGI, so the slot is released in a `finally` however
+    the request ends: finished, client gone before or during streaming, or an error."""
+
+    def __init__(self, app, limit: int):
+        self.app, self.limit, self.in_flight = app, limit, 0
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST" or not scope["path"].startswith("/v1/"):
+            return await self.app(scope, receive, send)
+        if self.in_flight >= self.limit:
+            busy = JSONResponse({"error": {"message": "the demo is busy, try again in a moment",
+                                           "type": "server_busy", "code": None}}, status_code=503)
+            return await busy(scope, receive, send)
+        self.in_flight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.in_flight -= 1
+
+
 def build():
     torch.set_num_threads(os.cpu_count() or 2)
     path = resolve_model_dir(MODEL)
@@ -35,35 +55,7 @@ def build():
     engine = LLMEngine(model, config, tok, num_blocks=NUM_BLOCKS, block_size=16, max_num_seqs=16,
                        max_batched_tokens=256, max_context=1024)
     app = create_app(AsyncEngine(engine), tok, MODEL, enable_viz=True)
-    in_flight = 0
-
-    @app.middleware("http")
-    async def limit(request: Request, call_next):
-        nonlocal in_flight
-        if not request.url.path.startswith("/v1/") or request.method != "POST":
-            return await call_next(request)
-        if in_flight >= MAX_IN_FLIGHT:
-            return JSONResponse({"error": {"message": "the demo is busy, try again in a moment",
-                                           "type": "server_busy", "code": None}}, status_code=503)
-        in_flight += 1
-        try:
-            response = await call_next(request)
-        except BaseException:
-            in_flight -= 1
-            raise
-        # Streaming bodies run after call_next returns: release the slot when the body is done.
-        body = response.body_iterator
-
-        async def release():
-            nonlocal in_flight
-            try:
-                async for chunk in body:
-                    yield chunk
-            finally:
-                in_flight -= 1
-
-        response.body_iterator = release()
-        return response
+    app.add_middleware(InFlightLimit, limit=MAX_IN_FLIGHT)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
