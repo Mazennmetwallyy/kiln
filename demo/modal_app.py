@@ -8,7 +8,7 @@ from pathlib import Path
 import modal
 
 HERE = Path(__file__).parent / "space"
-KILN_REF = "main"
+KILN_REF = "6bd502e"  # the kiln package version the image installs
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
