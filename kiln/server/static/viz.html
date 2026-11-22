@@ -203,14 +203,21 @@ canvas.addEventListener("pointerleave", () => { tip.style.opacity = 0; highlight
 new ResizeObserver(() => draw()).observe(canvas);
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
 
+let es = null;
 function connect() {
-  const es = new EventSource("kv/stream");
+  if (es) return;
+  es = new EventSource("kv/stream");
   es.onopen = () => { $("dot").classList.add("on"); $("status").textContent = "live"; };
   es.onmessage = (e) => render(JSON.parse(e.data));
   es.onerror = () => { $("dot").classList.remove("on"); $("status").textContent = "reconnecting…"; };
 }
 fetch("kv").then((r) => r.json()).then(render).catch(() => {});
 connect();
+// Don't hold a stream open from a background tab (it keeps a scale-to-zero server awake).
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && es) { es.close(); es = null; $("dot").classList.remove("on"); $("status").textContent = "paused"; }
+  else if (!document.hidden) connect();
+});
 </script>
 </body>
 </html>

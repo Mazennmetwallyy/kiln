@@ -21,6 +21,7 @@ from kiln.server.async_engine import AsyncEngine
 from kiln.tokenizer import Tokenizer
 
 MODEL = os.environ.get("KILN_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+DTYPE = {"fp32": torch.float32, "bf16": torch.bfloat16}[os.environ.get("KILN_DTYPE", "fp32")]
 NUM_BLOCKS = int(os.environ.get("KILN_NUM_BLOCKS", "320"))  # x 16 tokens
 MAX_IN_FLIGHT = 24  # a public demo on 2 vCPUs: refuse rather than queue for minutes
 PAGE = (Path(__file__).parent / "index.html").read_text()
@@ -50,7 +51,7 @@ class InFlightLimit:
 def build():
     torch.set_num_threads(os.cpu_count() or 2)
     path = resolve_model_dir(MODEL)
-    model, config = load_model(path, dtype=torch.float32, device="cpu")
+    model, config = load_model(path, dtype=DTYPE, device="cpu")
     tok = Tokenizer.from_hf_dir(path)
     engine = LLMEngine(model, config, tok, num_blocks=NUM_BLOCKS, block_size=16, max_num_seqs=16,
                        max_batched_tokens=256, max_context=1024)
