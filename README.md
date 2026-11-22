@@ -9,6 +9,8 @@ An LLM inference engine built from scratch in Python, PyTorch and Metal. It runs
 
 It's served behind an OpenAI-compatible streaming API, with Prometheus metrics and a live view of the KV cache.
 
+**[Live demo](https://mazennmetwallyy--kiln-demo-web.us-east.modal.run)**: chat with it, or fire a burst of requests and watch them share the KV cache. It runs on 2 free CPU cores and sleeps when idle, so the first load can take about a minute and generation is much slower than the Apple-GPU numbers below. Source: [`demo/`](demo/).
+
 ![KV cache visualiser](docs/img/kv_visualiser.gif)
 
 *The live KV-pool view (`kiln serve --enable-viz`, then open `/viz`). 45 chat requests with three different system prompts arrive at 2.5/s into a deliberately small 136-block pool:*
